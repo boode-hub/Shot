@@ -1,0 +1,64 @@
+[package]
+name = "shot"
+version = "0.1.0"
+edition = "2024"
+description = "Shot: a tiny, fast screenshot tool. Select, annotate, copy, save, or pin to the screen."
+license = "MIT"
+
+# Standalone project; not part of any parent workspace.
+[workspace]
+
+[dependencies]
+# Core: rendering, annotations, editor logic. Tested headless on any OS.
+tiny-skia = "0.11"
+ab_glyph = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Shell: windows, capture, clipboard, hotkey. All cross-platform.
+winit = "0.30"
+softbuffer = "0.4"
+xcap = "0.9"
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+global-hotkey = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+rfd = { version = "0.17", default-features = false }
+# OCR through the built-in Windows.Media.Ocr engine.
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_WinRT",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+rfd = { version = "0.17", default-features = false }
+
+# Linux/BSD: D-Bus tray and portal dialogs, so no GTK is needed.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+# Pixel loops are painfully slow unoptimised.
+[profile.dev.package."*"]
+opt-level = 3
+# tiny-skia has debug_assert!(false) on some harmless rasteriser edge cases;
+# keep dev builds behaving like release.
+[profile.dev.package.tiny-skia]
+debug-assertions = false
