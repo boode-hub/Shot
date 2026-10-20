@@ -91,8 +91,14 @@ mod imp {
     }
 
     pub fn recognize(pm: &Pixmap) -> Result<String, String> {
-        let path = std::env::temp_dir().join(format!("shot-ocr-{}.png", std::process::id()));
-        pm.save_png(&path).map_err(|e| e.to_string())?;
+        // A fresh, exclusively created file: never follows a planted symlink
+        // in a shared temp directory.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("shot-ocr-{}-{nanos}.png", std::process::id()));
+        let png = pm.encode_png().map_err(|e| e.to_string())?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut f, &png).map_err(|e| e.to_string())?;
+        drop(f);
         let out = Command::new("tesseract").arg(&path).arg("stdout").output();
         let _ = std::fs::remove_file(&path);
         let out = out.map_err(|e| format!("tesseract: {e}"))?;

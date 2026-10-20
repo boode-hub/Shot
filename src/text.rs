@@ -33,7 +33,23 @@ const CANDIDATES: &[&str] = &[
     "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
 ];
 
+const BOLD: &[&str] = &[
+    r"C:\Windows\Fonts\segoeuib.ttf",
+    r"C:\Windows\Fonts\seguisb.ttf",
+    r"C:\Windows\Fonts\arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+];
+
 impl Font {
+    /// A bold system font for headings, if one is installed.
+    pub fn load_system_bold() -> Option<Font> {
+        BOLD.iter().find_map(|p| Self::from_file(Path::new(p)))
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Font> {
         FontVec::try_from_vec_and_index(bytes, 0).ok().map(|inner| Font { inner })
     }

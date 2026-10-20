@@ -42,6 +42,11 @@ pub fn ask_path(dir: &Path, name: &str) -> Option<PathBuf> {
     Some(p)
 }
 
+/// Ask for a folder; `None` if the user cancelled.
+pub fn pick_folder(start: &Path) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_title("Folder for screenshots").set_directory(start).pick_folder()
+}
+
 /// Open a file or folder with the system's default handler.
 pub fn open(path: &Path) {
     #[cfg(windows)]
@@ -51,19 +56,6 @@ pub fn open(path: &Path) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let cmd = ("xdg-open", vec![path.as_os_str()]);
     if let Err(e) = std::process::Command::new(cmd.0).args(cmd.1).spawn() {
-        eprintln!("shot: cannot open {}: {e}", path.display());
-    }
-}
-
-/// Open the settings file in a text editor.
-pub fn edit(path: &Path) {
-    #[cfg(windows)]
-    let r = std::process::Command::new("notepad").arg(path).spawn();
-    #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg("-t").arg(path).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let r = std::process::Command::new("xdg-open").arg(path).spawn();
-    if let Err(e) = r {
         eprintln!("shot: cannot open {}: {e}", path.display());
     }
 }

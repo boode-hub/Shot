@@ -1,6 +1,6 @@
-//! Settings: a tiny `key = value` file next to the other per-user app data.
-//! Unknown keys are ignored and bad values fall back to defaults, so a typo
-//! never stops Shot from starting.
+//! Settings, stored as a tiny `key = value` file in the per-user app data
+//! folder. People change them in the Settings window, not by hand; unknown
+//! keys are ignored and bad values fall back to defaults.
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            hotkey: "PrintScreen".into(),
+            hotkey: crate::hotkey::DEFAULT.into(),
             save_dir: pictures_dir().join("Shot"),
             save_mode: SaveMode::Ask,
             copy_on_save: false,
@@ -40,6 +40,7 @@ impl Default for Config {
 impl Config {
     pub fn parse(text: &str) -> Config {
         let mut c = Config::default();
+        let mut version = 1;
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -48,6 +49,7 @@ impl Config {
             let Some((k, v)) = line.split_once('=') else { continue };
             let v = v.trim().trim_matches('"');
             match k.trim() {
+                "version" => version = v.parse().unwrap_or(1),
                 "hotkey" if !v.is_empty() => c.hotkey = v.to_string(),
                 "save_dir" if !v.is_empty() => c.save_dir = expand_home(v),
                 "save_mode" => {
@@ -63,14 +65,19 @@ impl Config {
                 _ => {}
             }
         }
+        // Version 1 defaulted to PrintScreen; the default is now Shift+Space.
+        if version < 2 && c.hotkey == "PrintScreen" {
+            c.hotkey = crate::hotkey::DEFAULT.into();
+        }
         c
     }
 
     pub fn render(&self) -> String {
         format!(
-            "# Shot settings. Restart Shot after editing (tray icon -> Quit, then start it again).\n\
+            "# Shot settings, managed by Shot's Settings window (tray icon -> Settings).\n\
+             version = 2\n\
              \n\
-             # Capture hotkey, e.g. PrintScreen, Ctrl+PrintScreen, Ctrl+Shift+KeyA, Alt+F1\n\
+             # Capture shortcut, e.g. Shift+Space, PrintScreen, Ctrl+Alt+KeyS\n\
              hotkey = {}\n\
              \n\
              # Where screenshots are saved.\n\
@@ -95,13 +102,14 @@ impl Config {
     }
 
     /// Read the settings file, creating it with defaults on first run.
-    pub fn load(path: &Path) -> Config {
+    /// The flag is true on that first run.
+    pub fn load(path: &Path) -> (Config, bool) {
         match std::fs::read_to_string(path) {
-            Ok(t) => Config::parse(&t),
+            Ok(t) => (Config::parse(&t), false),
             Err(_) => {
                 let c = Config::default();
                 let _ = c.save(path);
-                c
+                (c, true)
             }
         }
     }
@@ -182,6 +190,13 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(Config::parse(&c.render()), c);
+    }
+
+    #[test]
+    fn old_printscreen_default_moves_to_shift_space() {
+        assert_eq!(Config::parse("hotkey = PrintScreen\n").hotkey, "Shift+Space");
+        assert_eq!(Config::parse("version = 2\nhotkey = PrintScreen\n").hotkey, "PrintScreen");
+        assert_eq!(Config::parse("hotkey = Ctrl+F1\n").hotkey, "Ctrl+F1");
     }
 
     #[test]

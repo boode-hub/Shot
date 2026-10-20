@@ -8,6 +8,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use shot::config::{self, Config, SaveMode};
 use shot::editor::{self, Command, CursorKind, Editor, Key, Mods};
 use shot::geom::Pt;
+use shot::hotkey;
 use shot::text::Font;
 use tiny_skia::Pixmap;
 use tray_icon::menu::MenuEvent;
@@ -19,16 +20,25 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
-use super::pin::Pin;
 use super::present::{self, Context, Surface};
+use super::settings_window::SettingsWindow;
+
+mod pins;
+mod settings;
+
 use super::toast::{self, Toast};
-use super::{capture, ocr, output, tray};
+use super::{autostart, capture, ipc, ocr, output, tray};
+use pins::PinSlot;
+#[cfg(any(windows, target_os = "macos"))]
+use pins::{PinAction, pin_menu};
 
 pub enum UserEvent {
     Hotkey,
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     OcrDone(Result<String, String>),
+    /// Another launch of Shot asked this one to show Settings.
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -37,6 +47,8 @@ pub struct Options {
     pub capture_now: bool,
     /// No tray or hotkey; quit once the capture (and any pins) are closed.
     pub once: bool,
+    /// Open the Settings window at start.
+    pub settings: bool,
 }
 
 const FALLBACK_HOTKEY: &str = "Ctrl+PrintScreen";
@@ -59,6 +71,9 @@ pub fn run(opts: Options) -> Result<(), String> {
     MenuEvent::set_event_handler(Some(move |e| {
         let _ = p.send_event(UserEvent::Menu(e));
     }));
+    if !opts.once {
+        ipc::listen(proxy.clone());
+    }
     let ctx = Context::new(event_loop.owned_display_handle()).map_err(|e| e.to_string())?;
     let mut app = App::new(proxy, opts, ctx);
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
@@ -90,12 +105,6 @@ struct Overlay {
     cursor: CursorKind,
 }
 
-struct PinSlot {
-    pin: Pin,
-    clicks: Clicks,
-    mods: Mods,
-}
-
 struct App {
     proxy: EventLoopProxy<UserEvent>,
     opts: Options,
@@ -103,8 +112,19 @@ struct App {
     cfg: Config,
     cfg_path: std::path::PathBuf,
     font: Option<Rc<Font>>,
+    bold: Option<Rc<Font>>,
+    first_run: bool,
     clipboard: Option<arboard::Clipboard>,
     hotkeys: Option<GlobalHotKeyManager>,
+    /// The registered capture shortcut.
+    active_hotkey: Option<(String, HotKey)>,
+    /// Shortcut taken off while the user records a new one.
+    paused_hotkey: Option<String>,
+    recording: bool,
+    hotkey_error: Option<String>,
+    settings: Option<SettingsWindow>,
+    /// A problem to report as a toast on the next loop turn.
+    warning: Option<String>,
     tray: Option<tray::Tray>,
     #[cfg(any(windows, target_os = "macos"))]
     pin_menu: Option<pin_menu::PinMenu>,
@@ -120,15 +140,24 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>, opts: Options, ctx: Context) -> App {
         let cfg_path = config::app_dir().join("settings.txt");
+        let (cfg, first_run) = Config::load(&cfg_path);
         App {
             proxy,
             opts,
             ctx,
-            cfg: Config::load(&cfg_path),
+            cfg,
             cfg_path,
             font: Font::load_system().map(Rc::new),
+            bold: Font::load_system_bold().map(Rc::new),
+            first_run,
             clipboard: arboard::Clipboard::new().ok(),
             hotkeys: None,
+            active_hotkey: None,
+            paused_hotkey: None,
+            recording: false,
+            hotkey_error: None,
+            settings: None,
+            warning: None,
             tray: None,
             #[cfg(any(windows, target_os = "macos"))]
             pin_menu: None,
@@ -148,34 +177,33 @@ impl App {
             self.pin_menu = pin_menu::PinMenu::new().ok();
         }
         if !self.opts.once {
-            let mut active = None;
+            autostart::refresh_install();
             match GlobalHotKeyManager::new() {
-                Ok(m) => {
-                    for name in [self.cfg.hotkey.as_str(), FALLBACK_HOTKEY] {
-                        match name.parse::<HotKey>() {
-                            Ok(hk) if m.register(hk).is_ok() => {
-                                active = Some(name.to_string());
-                                break;
-                            }
-                            Ok(_) => eprintln!("shot: hotkey {name} is taken by another app"),
-                            Err(e) => eprintln!("shot: bad hotkey {name:?}: {e}"),
-                        }
-                    }
-                    self.hotkeys = Some(m);
-                }
-                Err(e) => eprintln!("shot: global hotkeys unavailable: {e}"),
+                Ok(m) => self.hotkeys = Some(m),
+                Err(e) => eprintln!("shot: global shortcuts unavailable: {e}"),
             }
-            match tray::build(active.as_deref()) {
+            let wanted = self.cfg.hotkey.clone();
+            let mut fallback = false;
+            if let Err(e) = self.register_hotkey(&wanted) {
+                eprintln!("shot: {e}");
+                self.hotkey_error = Some(e);
+                fallback = self.register_hotkey(FALLBACK_HOTKEY).is_ok();
+            }
+            match tray::build(self.active_hotkey_name()) {
                 Ok(t) => self.tray = Some(t),
                 Err(e) => eprintln!("shot: no tray icon: {e}"),
             }
-            match &active {
-                Some(k) if *k != self.cfg.hotkey => {
-                    self.show_toast(el, &format!("{} is in use by another app, so Shot uses {k}", self.cfg.hotkey), 5.0)
+            if self.first_run || self.opts.settings {
+                self.open_settings(el);
+            } else if let Some(k) = self.active_hotkey_name().map(hotkey::pretty) {
+                if fallback {
+                    let msg = format!("{} is used by another app, so Shot uses {k}. Change it in Settings.", hotkey::pretty(&wanted));
+                    self.show_toast(el, &msg, 5.0);
+                } else if !self.opts.capture_now {
+                    self.show_toast(el, &format!("Shot is running. Press {k} to capture."), 2.5);
                 }
-                Some(k) if !self.opts.capture_now => self.show_toast(el, &format!("Shot is running. Press {k} to capture."), 2.5),
-                None => self.show_toast(el, "No hotkey available. Use the tray icon to capture.", 5.0),
-                _ => {}
+            } else {
+                self.show_toast(el, "No capture shortcut works. Open Settings from the tray icon.", 5.0);
             }
         }
         if self.opts.capture_now {
@@ -303,22 +331,6 @@ impl App {
         self.toast = Some(t);
     }
 
-    fn make_pin(&mut self, el: &ActiveEventLoop, img: Pixmap, at: PhysicalPosition<i32>) {
-        let attrs = Self::popup("Shot pin").with_position(at).with_inner_size(PhysicalSize::new(img.width(), img.height()));
-        let window = match el.create_window(attrs) {
-            Ok(w) => Rc::new(w),
-            Err(e) => return self.show_toast(el, &format!("Cannot pin: {e}"), 4.0),
-        };
-        let surface = match present::surface(&self.ctx, &window) {
-            Ok(s) => s,
-            Err(e) => return self.show_toast(el, &format!("Cannot pin: {e}"), 4.0),
-        };
-        let mut pin = Pin::new(window, surface, img);
-        pin.render();
-        pin.window.focus_window();
-        self.pins.push(PinSlot { pin, clicks: Clicks::default(), mods: Mods::default() });
-    }
-
     // ----- what to do with a finished capture --------------------------------
 
     fn finish(&mut self, el: &ActiveEventLoop, i: usize, cmd: Command) {
@@ -329,7 +341,7 @@ impl App {
         self.close_overlays();
         if style != self.cfg.style {
             self.cfg.style = style;
-            let _ = self.cfg.save(&self.cfg_path);
+            self.save_config();
         }
         let Some(img) = img else { return };
         match cmd {
@@ -473,100 +485,19 @@ impl App {
         }
     }
 
-    fn pin_event(&mut self, el: &ActiveEventLoop, i: usize, event: WindowEvent) {
-        let slot = &mut self.pins[i];
-        match event {
-            WindowEvent::CloseRequested => {
-                self.pins.remove(i);
-            }
-            WindowEvent::RedrawRequested => slot.pin.render(),
-            WindowEvent::Resized(_) => slot.pin.window.request_redraw(),
-            WindowEvent::Focused(f) => {
-                slot.pin.focused = f;
-                slot.pin.window.request_redraw();
-            }
-            WindowEvent::ModifiersChanged(m) => slot.mods = mods(m.state()),
-            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => match button {
-                MouseButton::Left => {
-                    // Double-click closes; otherwise drag the pin around.
-                    slot.pin.window.focus_window();
-                    if slot.clicks.press(Pt::default()) {
-                        self.pins.remove(i);
-                    } else {
-                        let _ = slot.pin.window.drag_window();
-                    }
-                }
-                MouseButton::Middle => {
-                    self.pins.remove(i);
-                }
-                MouseButton::Right => {
-                    self.menu_target = Some(slot.pin.window.id());
-                    #[cfg(any(windows, target_os = "macos"))]
-                    if let Some(menu) = &self.pin_menu {
-                        menu.show(&slot.pin.window);
-                    }
-                }
-                _ => {}
-            },
-            WindowEvent::MouseWheel { delta, .. } => slot.pin.zoom_by(wheel_lines(delta)),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let ctrl = slot.mods.ctrl;
-                match map_key(&event) {
-                    Some(Key::Escape) => {
-                        self.pins.remove(i);
-                    }
-                    Some(Key::Char('c')) if ctrl => self.pin_action(el, i, PinAction::Copy),
-                    Some(Key::Char('s')) if ctrl => self.pin_action(el, i, PinAction::Save),
-                    Some(Key::Char('t')) if ctrl => self.pin_action(el, i, PinAction::Ocr),
-                    Some(Key::Char('0')) => slot.pin.set_zoom(1.0),
-                    Some(Key::Char('=' | '+')) => slot.pin.zoom_by(1.0),
-                    Some(Key::Char('-')) => slot.pin.zoom_by(-1.0),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn pin_action(&mut self, el: &ActiveEventLoop, i: usize, a: PinAction) {
-        let Some(slot) = self.pins.get_mut(i) else { return };
-        match a {
-            PinAction::Copy => {
-                let img = slot.pin.image.clone();
-                self.copy(el, &img);
-            }
-            PinAction::Save => {
-                let img = slot.pin.image.clone();
-                let ask = self.cfg.save_mode == SaveMode::Ask;
-                self.save(el, &img, ask);
-            }
-            PinAction::Ocr => {
-                let img = slot.pin.image.clone();
-                self.read_text(el, img);
-            }
-            PinAction::ActualSize => slot.pin.set_zoom(1.0),
-            PinAction::Close => {
-                self.pins.remove(i);
-            }
+    fn save_config(&mut self) {
+        if let Err(e) = self.cfg.save(&self.cfg_path) {
+            self.warning = Some(format!("Settings could not be saved: {e}"));
         }
     }
 
     fn exit_if_done(&self, el: &ActiveEventLoop) {
-        let idle = self.overlays.is_empty() && self.pins.is_empty() && self.toast.is_none() && self.ocr_pending == 0;
+        let idle =
+            self.overlays.is_empty() && self.pins.is_empty() && self.toast.is_none() && self.ocr_pending == 0 && self.settings.is_none();
         if self.opts.once && self.captured && idle {
             el.exit();
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub enum PinAction {
-    Copy,
-    Save,
-    Ocr,
-    ActualSize,
-    Close,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -602,21 +533,14 @@ impl ApplicationHandler<UserEvent> for App {
                     let _ = std::fs::create_dir_all(&self.cfg.save_dir);
                     output::open(&self.cfg.save_dir);
                 } else if e.id == t.settings {
-                    let _ = self.cfg.save(&self.cfg_path);
-                    output::edit(&self.cfg_path);
+                    self.open_settings(el);
                 } else if e.id == t.close_pins {
                     self.pins.clear();
-                } else if e.id == *t.autostart.id() {
-                    let want = !super::autostart::is_enabled();
-                    let r = super::autostart::set(want);
-                    t.autostart.set_checked(super::autostart::is_enabled());
-                    if let Err(e) = r {
-                        self.show_toast(el, &format!("Could not change start-up setting: {e}"), 4.0);
-                    }
                 } else if e.id == t.quit {
                     el.exit();
                 }
             }
+            UserEvent::OpenSettings => self.open_settings(el),
             UserEvent::OcrDone(r) => {
                 self.ocr_pending = self.ocr_pending.saturating_sub(1);
                 match r {
@@ -642,6 +566,8 @@ impl ApplicationHandler<UserEvent> for App {
             self.overlay_event(el, i, event);
         } else if let Some(i) = self.pins.iter().position(|p| p.pin.window.id() == id) {
             self.pin_event(el, i, event);
+        } else if self.settings.as_ref().is_some_and(|s| s.window.id() == id) {
+            self.settings_event(el, event);
         } else if let Some(t) = self.toast.as_mut().filter(|t| t.window.id() == id) {
             match event {
                 WindowEvent::RedrawRequested => t.render(),
@@ -652,6 +578,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if let Some(w) = self.warning.take() {
+            self.show_toast(el, &w, 5.0);
+        }
         if self.toast.as_ref().is_some_and(|t| t.until <= Instant::now()) {
             self.toast = None;
         }
@@ -711,67 +640,5 @@ fn cursor_icon(c: CursorKind) -> CursorIcon {
         CursorKind::ResizeNesw => CursorIcon::NeswResize,
         CursorKind::ResizeEw => CursorIcon::EwResize,
         CursorKind::ResizeNs => CursorIcon::NsResize,
-    }
-}
-
-/// Right-click menu on pins (Windows and macOS; Linux uses the shortcuts).
-#[cfg(any(windows, target_os = "macos"))]
-mod pin_menu {
-    use tray_icon::menu::{ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem};
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use winit::window::Window;
-
-    use super::PinAction;
-
-    pub struct PinMenu {
-        menu: Menu,
-        items: Vec<(MenuId, PinAction)>,
-        pub close_all: MenuId,
-    }
-
-    impl PinMenu {
-        pub fn new() -> Result<PinMenu, String> {
-            let entries = [
-                ("Copy\tCtrl+C", PinAction::Copy),
-                ("Save…\tCtrl+S", PinAction::Save),
-                ("Copy text (OCR)\tCtrl+T", PinAction::Ocr),
-                ("Actual size\t0", PinAction::ActualSize),
-                ("Close\tEsc", PinAction::Close),
-            ];
-            let menu = Menu::new();
-            let mut items = Vec::new();
-            for (i, (label, action)) in entries.iter().enumerate() {
-                if i == 4 {
-                    menu.append(&PredefinedMenuItem::separator()).map_err(|e| e.to_string())?;
-                }
-                let item = MenuItem::new(*label, true, None);
-                menu.append(&item).map_err(|e| e.to_string())?;
-                items.push((item.id().clone(), *action));
-            }
-            let all = MenuItem::new("Close all pins", true, None);
-            menu.append(&all).map_err(|e| e.to_string())?;
-            let close_all = all.id().clone();
-            items.push((close_all.clone(), PinAction::Close));
-            Ok(PinMenu { menu, items, close_all })
-        }
-
-        pub fn action(&self, id: &MenuId) -> Option<PinAction> {
-            self.items.iter().find(|(i, _)| i == id).map(|(_, a)| *a)
-        }
-
-        pub fn show(&self, window: &Window) {
-            let Ok(handle) = window.window_handle() else { return };
-            match handle.as_raw() {
-                #[cfg(windows)]
-                RawWindowHandle::Win32(h) => unsafe {
-                    self.menu.show_context_menu_for_hwnd(h.hwnd.get(), None);
-                },
-                #[cfg(target_os = "macos")]
-                RawWindowHandle::AppKit(h) => unsafe {
-                    self.menu.show_context_menu_for_nsview(h.ns_view.as_ptr(), None);
-                },
-                _ => {}
-            }
-        }
     }
 }

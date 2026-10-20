@@ -1,8 +1,9 @@
 # Shot
 
-A tiny, fast screenshot tool written in Rust. Press **PrintScreen**, drag over
-what you want, mark it up, then **copy**, **save**, or **pin** it to the screen
-so you can keep reading it while you work in another window.
+A tiny, fast screenshot tool written in Rust. Press **Shift + Space** (or any
+shortcut you choose), drag over what you want, mark it up, then **copy**,
+**save**, or **pin** it to the screen so you can keep reading it while you work
+in another window.
 
 No GPU, no web view, no runtime: one small executable that sits in the tray.
 
@@ -45,51 +46,47 @@ No GPU, no web view, no runtime: one small executable that sits in the tray.
 - **OCR (copy text from a screenshot):** on Windows this uses the OCR engine
   built into Windows 10/11 (the one the Snipping Tool uses), so nothing extra
   to install. On Linux and macOS, Shot uses `tesseract` if it is installed.
-- **Tray icon:** left-click to capture; right-click for screenshots folder,
-  settings, close all pins, **Start with Windows**, quit.
+- **Tray icon** (the Sharingan): left-click to capture; right-click for
+  Settings, the screenshots folder, close all pins, quit.
+- **Settings window:** pick the capture shortcut (click *Change* and press the
+  keys), the screenshots folder, how the Save button behaves, and **Start Shot
+  when I log in**. It opens on first run, from the tray, or by starting Shot
+  again while it is already running.
 
-## Build and run (Windows)
+## Get it (Windows)
+
+**Ready-made:** every push builds `shot.exe` on GitHub. Open the repo's
+**Actions** tab → latest **CI** run → **Artifacts** → *Shot-windows*.
+
+**Or build it:**
 
 1. Install Rust from <https://rustup.rs> (take the default MSVC option; it
    installs the Visual Studio build tools if they are missing).
-2. In this folder:
-   ```
-   cargo build --release
-   ```
-3. Run `target\release\shot.exe`. A blue icon appears in the tray. Press
-   **PrintScreen**.
+2. In this folder: `cargo build --release`
+3. Run `target\release\shot.exe`.
 
-To start it with Windows, tick **Start with Windows** in the tray menu.
+The Settings window opens the first time. Turn on **Start Shot when I log in**
+to install it: Shot copies itself to
+`%LOCALAPPDATA%\Programs\Shot\Shot.exe`, adds itself to your start-up apps
+and to the Start Menu (no admin rights needed). Running a newer build later
+updates that installed copy automatically (quit the running Shot first).
 
-### PrintScreen already taken?
+### About Shift + Space
 
-Only one app can own a hotkey. If **LightShot** is running, quit it (and remove
-it from start-up). On Windows 11, also turn off *Settings → Accessibility →
-Keyboard → "Use the Print screen key to open screen capture"*. If PrintScreen
-is still taken, Shot falls back to **Ctrl+PrintScreen** and tells you so; you
-can pick any hotkey in the settings.
-
-## Settings
-
-Tray → **Settings…** opens `settings.txt` (on Windows:
-`%APPDATA%\Shot\settings.txt`). Restart Shot after editing.
-
-```
-hotkey = PrintScreen          # e.g. Ctrl+PrintScreen, Ctrl+Shift+KeyA, Alt+F1
-save_dir = C:\Users\you\Pictures\Shot
-save_mode = ask               # ask = Save dialog, folder = save straight away
-copy_on_save = false          # also copy when saving
-color = #ff3b30               # remembered automatically
-highlighter = #ffd60a
-size = 2
-```
+A global shortcut belongs to Shot everywhere, so while Shot runs, Shift + Space
+no longer types a space in other apps when Shift is held. If that gets in the
+way, pick something else in Settings (for example Print Screen or
+Ctrl + Shift + S). Windows can't tell left Shift from right Shift for global
+shortcuts, so both work. Only one app can own a shortcut; if another app has
+it, Settings says so.
 
 ## Command line
 
 ```
-shot              run in the tray (default)
+shot              run in the tray (if already running: open its Settings)
 shot --capture    run in the tray and capture right away
-shot --once       capture now, quit when done (no tray, no hotkey)
+shot --settings   run in the tray and open Settings
+shot --once       capture now, quit when done (no tray, no shortcut)
 ```
 
 `--once` is handy for binding a key in your desktop's own shortcut settings
@@ -114,27 +111,36 @@ src/
   annot.rs      annotation shapes, rendering, blur
   toolbar.rs    toolbar layout, hit-testing, vector icons
   editor.rs     the capture editor: selection, tools, undo, rendering
-  config.rs     settings file
-  icon.rs       the app icon, drawn in code
+  settings.rs   the Settings window's layout, drawing and clicks
+  hotkey.rs     shortcut recording, validation and display names
+  config.rs     settings storage
+  icon.rs       the Sharingan logo, drawn in code (+ .ico export)
   main.rs       entry point, command line, single instance
   shell/        desktop integration
-    app.rs        event loop: hotkey, tray, overlays, pins, toasts
+    app/mod.rs    event loop: shortcut, tray, overlays, toasts
+    app/pins.rs   pinned screenshots: input and right-click menu
+    app/settings.rs  capture shortcut and the Settings window
     capture.rs    grab monitors and window rectangles (xcap)
     present.rs    pixels to window (softbuffer, CPU only)
-    pin.rs        pinned screenshots
+    pin.rs        pin window drawing and zoom
+    settings_window.rs  the Settings window itself
     toast.rs      "Copied to clipboard" messages
     tray.rs       tray icon and menu
-    output.rs     clipboard, PNG files, Save dialog
+    output.rs     clipboard, PNG files, Save / folder dialogs
     ocr.rs        Windows OCR / tesseract
-    autostart.rs  start at login
+    autostart.rs  install + start at login
+    ipc.rs        a second launch opens the running copy's Settings
 examples/
-  preview.rs    renders the editor UI to PNGs (no display needed)
-  bench.rs      frame-time check at 4K
+  preview.rs           editor UI to PNGs (no display needed)
+  settings_preview.rs  Settings window to PNGs
+  logo.rs              logo PNGs and shot.ico
+  bench.rs             frame-time check at 4K
+.github/workflows/ci.yml   build, lint, test; downloadable shot.exe
 ```
 
 All drawing is done on the CPU with `tiny-skia`, and pixels go to the screen
-with `softbuffer`. At 4K a frame takes about 3–6 ms (about 11 ms while
-dragging a large blur).
+with `softbuffer`. At 4K a frame takes about 3–6 ms (about 10 ms while
+dragging a large blur), and opening a capture takes about 25 ms per monitor.
 
 ```
 cargo test                                  # core tests
@@ -148,4 +154,5 @@ cargo run --release --example bench         # 4K frame timings
 - Magnifier loupe with the pixel colour while selecting
 - Scrolling capture and screen recording (GIF/MP4)
 - Upload or share link
-- Window icon and version info embedded in `shot.exe`
+- Embed the logo in `shot.exe` itself (`cargo run --example logo -- assets`
+  writes `shot.ico`; a small build script can attach it)

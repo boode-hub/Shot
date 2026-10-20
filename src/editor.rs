@@ -109,7 +109,9 @@ impl Default for Style {
 pub struct Editor {
     base: Pixmap,
     dimmed: Pixmap,
-    composite: Pixmap,
+    /// `base` with the annotations burned in; created on the first one, so a
+    /// plain capture holds two full-screen copies instead of three.
+    composite: Option<Pixmap>,
     screen: IRect,
     scale: f32,
     font: Option<Rc<Font>>,
@@ -139,14 +141,15 @@ impl Editor {
         let screen = IRect::new(0, 0, base.width() as i32, base.height() as i32);
         let windows = windows.into_iter().map(|w| w.intersect(&screen)).filter(|w| w.w > 8 && w.h > 8).collect();
         let mut dimmed = base.clone();
-        let keep = 1.0 - style::DIM;
+        let keep = ((1.0 - style::DIM) * 256.0) as u32;
+        let lut: [u8; 256] = std::array::from_fn(|v| ((v as u32 * keep) >> 8) as u8);
         for px in dimmed.data_mut().as_chunks_mut::<4>().0 {
-            for c in &mut px[..3] {
-                *c = (*c as f32 * keep) as u8;
-            }
+            px[0] = lut[px[0] as usize];
+            px[1] = lut[px[1] as usize];
+            px[2] = lut[px[2] as usize];
         }
         Editor {
-            composite: base.clone(),
+            composite: None,
             dimmed,
             base,
             screen,
@@ -224,7 +227,7 @@ impl Editor {
         self.sel = None;
         self.annots.clear();
         self.redo.clear();
-        self.composite = self.base.clone();
+        self.composite = None;
         self.drag = Drag::None;
         self.tool = Tool::Select;
         self.palette_open = false;
@@ -601,8 +604,18 @@ impl Editor {
 
     // ----- annotation stack -----------------------------------------------
 
+    /// What the selection currently shows: the capture plus annotations.
+    fn picture(&self) -> &Pixmap {
+        self.composite.as_ref().unwrap_or(&self.base)
+    }
+
+    fn burn_in(&mut self, a: &Annotation) {
+        let pm = self.composite.get_or_insert_with(|| self.base.clone());
+        a.draw(pm, self.font.as_deref());
+    }
+
     fn push(&mut self, a: Annotation) {
-        a.draw(&mut self.composite, self.font.as_deref());
+        self.burn_in(&a);
         self.annots.push(a);
         self.redo.clear();
     }
@@ -628,15 +641,16 @@ impl Editor {
 
     pub fn redo(&mut self) {
         if let Some(a) = self.redo.pop() {
-            a.draw(&mut self.composite, self.font.as_deref());
+            self.burn_in(&a);
             self.annots.push(a);
         }
     }
 
     fn rebuild(&mut self) {
-        self.composite = self.base.clone();
-        for a in &self.annots {
-            a.draw(&mut self.composite, self.font.as_deref());
+        self.composite = None;
+        for a in std::mem::take(&mut self.annots) {
+            self.burn_in(&a);
+            self.annots.push(a);
         }
     }
 
@@ -718,7 +732,7 @@ impl Editor {
     pub fn export(&mut self) -> Option<Pixmap> {
         self.commit_text();
         let s = self.sel?.intersect(&self.screen);
-        crop(&self.composite, s)
+        crop(self.picture(), s)
     }
 
     /// Render the whole overlay (dimmed screen, selection, chrome) into `out`,
@@ -732,7 +746,7 @@ impl Editor {
             _ => None,
         };
         if let Some(r) = bright {
-            blit(out, &self.composite, r);
+            blit(out, self.picture(), r);
         }
 
         if let Drag::Drawing { ann, .. } = &self.drag {
