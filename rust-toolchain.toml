@@ -1,0 +1,4 @@
+# One Rust version for every build (CI and local), so builds are reproducible.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

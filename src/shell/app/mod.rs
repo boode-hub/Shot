@@ -336,7 +336,8 @@ impl App {
     fn finish(&mut self, el: &ActiveEventLoop, i: usize, cmd: Command) {
         let o = &mut self.overlays[i];
         let img = if cmd == Command::Cancel { None } else { o.editor.export() };
-        let at = o.editor.selection().map(|s| PhysicalPosition::new(o.origin.x + s.x, o.origin.y + s.y));
+        let t = o.editor.target();
+        let at = PhysicalPosition::new(o.origin.x + t.x, o.origin.y + t.y);
         let style = o.editor.style();
         self.close_overlays();
         if style != self.cfg.style {
@@ -348,7 +349,7 @@ impl App {
             Command::Copy => self.copy(el, &img),
             Command::Save if self.cfg.save_mode == SaveMode::Ask => self.save(el, &img, true),
             Command::Save | Command::QuickSave => self.save(el, &img, false),
-            Command::Pin => self.make_pin(el, img, at.unwrap_or_default()),
+            Command::Pin => self.make_pin(el, img, at),
             Command::Ocr => self.read_text(el, img),
             Command::Cancel => {}
         }
@@ -429,6 +430,9 @@ impl App {
                 o.editor.mouse_move(o.pos);
             }
             WindowEvent::CursorLeft { .. } => o.editor.mouse_leave(),
+            // With several monitors, keys go to the screen the mouse is on, so
+            // Ctrl+C copies that screen.
+            WindowEvent::CursorEntered { .. } if !o.window.has_focus() => o.window.focus_window(),
             WindowEvent::MouseInput { state, button, .. } => {
                 let b = match button {
                     MouseButton::Left => editor::Button::Left,

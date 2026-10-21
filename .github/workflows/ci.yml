@@ -1,6 +1,8 @@
 # Every push: format, lint and test on Windows and Linux, then a release
 # build of shot.exe you can download from the run's "Artifacts" section.
 # (macOS is left out on purpose: private repos pay 10x for macOS minutes.)
+# Rust is pinned (also in rust-toolchain.toml) so a new release's lints
+# never turn the build red on their own.
 name: CI
 
 on:
@@ -16,7 +18,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -36,7 +38,7 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libclang-dev libgbm-dev libegl-dev libwayland-dev libxkbcommon-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2

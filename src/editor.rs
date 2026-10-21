@@ -526,8 +526,8 @@ impl Editor {
                 }
                 Some(Command::Cancel)
             }
-            Key::Enter => self.sel.map(|_| Command::Copy),
-            Key::F3 => self.sel.map(|_| Command::Pin),
+            Key::Enter => Some(Command::Copy),
+            Key::F3 => Some(Command::Pin),
             Key::Left | Key::Right | Key::Up | Key::Down => {
                 let d = if m.shift { 10 } else { 1 };
                 if let Some(s) = self.sel {
@@ -728,10 +728,16 @@ impl Editor {
 
     // ----- output -----------------------------------------------------------
 
-    /// The selected region with all annotations burned in.
+    /// What Copy / Save / Pin act on: the selection; before one is made, what
+    /// is shown highlighted (the window under the cursor), else the screen.
+    pub fn target(&self) -> IRect {
+        self.sel.or_else(|| self.cursor.and_then(|c| self.window_at(c))).unwrap_or(self.screen)
+    }
+
+    /// The [`target`](Self::target) with all annotations burned in.
     pub fn export(&mut self) -> Option<Pixmap> {
         self.commit_text();
-        let s = self.sel?.intersect(&self.screen);
+        let s = self.target().intersect(&self.screen);
         crop(self.picture(), s)
     }
 
@@ -863,7 +869,7 @@ impl Editor {
     }
 
     fn render_hint(&self, out: &mut Pixmap) {
-        let text = "Drag to select  ·  Click a window  ·  Ctrl+A full screen  ·  Esc to cancel";
+        let text = "Drag to select  ·  Click a window  ·  Ctrl+C copy now  ·  Esc to cancel";
         let px = self.ui(14.0);
         let (w, _) = self.pill_size(text, px);
         let x = (self.screen.w as f32 - w) / 2.0;
@@ -994,6 +1000,23 @@ mod tests {
     }
 
     #[test]
+    fn copy_before_selecting_takes_what_is_highlighted() {
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let mut e = editor(800, 600);
+        // Cursor over the window at (100,100) 300x200: that window.
+        e.mouse_move(Pt::new(150.0, 150.0));
+        assert_eq!(e.key(Key::Char('c'), ctrl), Some(Command::Copy));
+        let img = e.export().unwrap();
+        assert_eq!((img.width(), img.height()), (300, 200));
+        // Cursor over the desktop: the whole screen.
+        e.mouse_move(Pt::new(700.0, 500.0));
+        assert_eq!(e.target(), IRect::new(0, 0, 800, 600));
+        // Never moved the mouse: the whole screen too.
+        let mut fresh = editor(800, 600);
+        assert_eq!(fresh.export().map(|p| (p.width(), p.height())), Some((800, 600)));
+    }
+
+    #[test]
     fn selection_is_clamped_to_screen() {
         let mut e = editor(800, 600);
         drag(&mut e, (700.0, 500.0), (900.0, 700.0));
@@ -1106,7 +1129,7 @@ mod tests {
     #[test]
     fn commands_from_keys_and_toolbar() {
         let mut e = editor(800, 600);
-        assert_eq!(e.key(Key::Enter, Mods::default()), None, "nothing to copy yet");
+        assert_eq!(e.key(Key::Enter, Mods::default()), Some(Command::Copy), "copies the whole screen before a selection");
         drag(&mut e, (100.0, 100.0), (500.0, 300.0));
         assert_eq!(e.key(Key::Enter, Mods::default()), Some(Command::Copy));
         let ctrl = Mods { ctrl: true, ..Mods::default() };

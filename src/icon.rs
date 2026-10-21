@@ -24,11 +24,11 @@ fn paint(c: [u8; 4]) -> Paint<'static> {
 fn tail_path() -> Option<Path> {
     let nums: Vec<f32> = TOMOE_TAIL.split(|c: char| c.is_whitespace() || c == 'M' || c == 'Z').filter_map(|t| t.parse().ok()).collect();
     let mut pb = PathBuilder::new();
-    let mut pts = nums.chunks_exact(2);
-    let first = pts.next()?;
-    pb.move_to(first[0], first[1]);
-    for p in pts {
-        pb.line_to(p[0], p[1]);
+    let (pts, _) = nums.as_chunks::<2>();
+    let ([x0, y0], rest) = pts.split_first()?;
+    pb.move_to(*x0, *y0);
+    for [x, y] in rest {
+        pb.line_to(*x, *y);
     }
     pb.close();
     pb.finish()
