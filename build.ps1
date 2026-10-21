@@ -5,8 +5,8 @@
 .DESCRIPTION
     1. Gets the latest Shot code from GitHub (installs Git with winget if it is
        missing; the first time, Git asks you to sign in to GitHub).
-    2. Installs Rust if it is missing. Uses Rust's GNU toolchain, which brings
-       its own linker, so Visual Studio is not needed.
+    2. Installs Rust if it is missing, plus LLVM's dlltool (one time). Uses
+       Rust's GNU toolchain, so Visual Studio is not needed.
     3. Builds Shot.exe in this folder and starts it.
 
     Shot.exe is compiled here rather than downloaded, so Windows does not treat
@@ -136,6 +136,62 @@ $installed = (& rustup toolchain list) -match [regex]::Escape($Toolchain)
 if (-not $installed) {
     Invoke-Checked rustup @('toolchain', 'install', $Toolchain, '--profile', 'minimal', '--no-self-update')
 }
+
+# The GNU toolchain carries its own gcc and ld (the rust-mingw component) in a
+# folder the compiler does not search on its own; put it on PATH.
+$sysroot = (& rustc "+$Toolchain" --print sysroot).Trim()
+$mingw = Join-Path $sysroot 'lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained'
+if (-not (Test-Path (Join-Path $mingw 'ld.exe'))) {
+    Invoke-Checked rustup @('component', 'add', 'rust-mingw', '--toolchain', $Toolchain)
+}
+if (-not (Test-Path (Join-Path $mingw 'ld.exe'))) {
+    Fail "Rust's build tools are missing from $mingw. Try: rustup toolchain uninstall $Toolchain, then run this script again."
+}
+
+# Rust's own dlltool needs an assembler it does not ship, so use LLVM's
+# dlltool (no assembler needed) from llvm-mingw. Only its four files are kept,
+# and each must match the hash of the copy Shot was tested with.
+$Tools = Join-Path $env:LOCALAPPDATA 'Shot\buildtools'
+$LlvmMingw = 'llvm-mingw-20260311-ucrt-x86_64'
+$ToolHashes = @{
+    'dlltool.exe'    = 'A82E0E18AE664B6215DC92CAAC41CD4925034DAED712BA73B9BDBBFE4B00647E'
+    'libLLVM-22.dll' = '60FE76D5CCC133772D96A798A349CFF37D3D7143998E428EF341F015FBAE8887'
+    'libc++.dll'     = 'A94862388DED8B71846140550469D2ED408F385FAFCF0310963ABD2352F15868'
+    'libunwind.dll'  = '0F45138D6DBDB9233E0EC91B84E5AE224502975DDEA2E1784568AF51296DB07D'
+}
+function Test-Tools {
+    foreach ($name in $ToolHashes.Keys) {
+        $file = Join-Path $Tools $name
+        if (-not (Test-Path $file)) { return $false }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash -ne $ToolHashes[$name]) { return $false }
+    }
+    return $true
+}
+if (-not (Test-Tools)) {
+    Write-Host 'Downloading LLVM dlltool (one time, about 190 MB download, 80 MB kept)...'
+    New-Item -ItemType Directory -Force -Path $Tools | Out-Null
+    $zip = Join-Path $env:TEMP "$LlvmMingw.zip"
+    Invoke-WebRequest -UseBasicParsing -OutFile $zip `
+        -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/20260311/$LlvmMingw.zip"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        foreach ($name in $ToolHashes.Keys) {
+            $entry = $archive.GetEntry("$LlvmMingw/bin/$name")
+            if (-not $entry) { Fail "$name is missing from $LlvmMingw.zip." }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $Tools $name), $true)
+        }
+    }
+    finally {
+        $archive.Dispose()
+        Remove-Item $zip -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Tools)) {
+        Remove-Item (Join-Path $Tools '*') -ErrorAction SilentlyContinue
+        Fail 'The downloaded build tools did not match the expected checksums, so they were deleted. Run the script again.'
+    }
+}
+$env:Path = "$Tools;$mingw;$env:Path"
 
 # --- 3. Build -------------------------------------------------------------------
 
