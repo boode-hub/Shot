@@ -119,8 +119,12 @@ if (-not (Test-Command rustup)) {
     Remove-Item $init -ErrorAction SilentlyContinue
     $env:Path = "$CargoBin;$env:Path"
 }
-# Installs once; afterwards this only checks it is there.
-Invoke-Checked rustup @('toolchain', 'install', $Toolchain, '--profile', 'minimal')
+# Install the pinned Rust once. --no-self-update: rustup must not try to
+# replace its own .exe, which locked-down PCs refuse (os error 5).
+$installed = (& rustup toolchain list) -match [regex]::Escape($Toolchain)
+if (-not $installed) {
+    Invoke-Checked rustup @('toolchain', 'install', $Toolchain, '--profile', 'minimal', '--no-self-update')
+}
 
 # --- 3. Build -------------------------------------------------------------------
 
