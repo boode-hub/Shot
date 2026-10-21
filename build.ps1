@@ -91,6 +91,7 @@ if (-not $NoUpdate) {
     & git -C $Root rev-parse --verify -q HEAD *> $null
     $hasCode = ($LASTEXITCODE -eq 0)
     $ErrorActionPreference = 'Stop'
+    $scriptBefore = (Get-FileHash -LiteralPath $PSCommandPath).Hash
     if ($hasCode) {
         Invoke-Checked git @('-C', $Root, 'pull', '--ff-only', 'origin', 'main')
     }
@@ -99,6 +100,16 @@ if (-not $NoUpdate) {
         Invoke-Checked git @('-C', $Root, 'fetch', 'origin', 'main')
         Invoke-Checked git @('-C', $Root, 'checkout', '-q', '-f', '-B', 'main', 'origin/main')
         Invoke-Checked git @('-C', $Root, 'branch', '-q', '--set-upstream-to=origin/main', 'main')
+    }
+
+    # The update may have brought a newer build.ps1: hand over to it, so a fix
+    # to this script takes effect on the same run.
+    if ((Get-FileHash -LiteralPath $PSCommandPath).Hash -ne $scriptBefore) {
+        Write-Host 'build.ps1 was updated; continuing with the new version.'
+        $relay = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-NoUpdate')
+        if ($NoRun) { $relay += '-NoRun' }
+        & (Get-Process -Id $PID).Path @relay
+        exit $LASTEXITCODE
     }
 }
 
