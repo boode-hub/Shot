@@ -68,6 +68,13 @@ Or put `build.ps1` in a folder and run
 double-click `build.cmd`): it gets or updates the repository (installing Git
 with winget if needed) and starts `Shot.exe`. Run it again any time to update.
 
+**Portable:** `Shot.exe` is a single file with nothing to install. A
+`portable.txt` next to it (included in the repository) makes Shot keep its
+settings in a `data` folder beside it instead of your user profile, and "Start
+Shot when I log in" then runs that copy where it is instead of installing one.
+Copy `Shot.exe` + `portable.txt` to any folder or USB stick and run it there;
+delete `portable.txt` to use the user profile instead.
+
 A file that arrives through Git is not marked as downloaded from the internet,
 so Windows does not block it as an unknown program the way it does a browser
 download.
@@ -150,6 +157,7 @@ examples/
   bench.rs             frame-time check at 4K
 .github/workflows/ci.yml   build, lint, test; downloadable shot.exe
 Shot.exe                   ready-made portable Windows build
+portable.txt               keeps Shot's settings beside Shot.exe (portable mode)
 build.ps1 / build.cmd      update from GitHub and start Shot (-FromSource: build it)
 rust-toolchain.toml        the one Rust version every build uses
 ```

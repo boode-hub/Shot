@@ -8,8 +8,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where the installed copy lives.
+/// Where the copy that runs at login lives. A portable Shot is never copied:
+/// it is registered where it is.
 pub fn install_path() -> PathBuf {
+    if shot::config::portable_dir().is_some()
+        && let Ok(me) = std::env::current_exe()
+    {
+        return me;
+    }
     imp::install_path()
 }
 

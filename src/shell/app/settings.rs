@@ -103,6 +103,7 @@ impl App {
             copy_on_save: self.cfg.copy_on_save,
             autostart: autostart::is_enabled(),
             install_path: autostart::install_path().display().to_string(),
+            portable: shot::config::portable_dir().is_some(),
         }
     }
 

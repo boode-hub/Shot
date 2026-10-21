@@ -22,6 +22,7 @@ fn main() {
         copy_on_save: false,
         autostart: true,
         install_path: r"C:\Users\boode\AppData\Local\Programs\Shot\Shot.exe".into(),
+        portable: false,
     };
     let shots: [(&str, f32, Setup); 3] = [
         (

@@ -133,8 +133,27 @@ fn expand_home(v: &str) -> PathBuf {
     }
 }
 
-/// Per-user directory for Shot's own files (settings, lock file).
+/// Name of the marker file that makes a copy of Shot portable.
+pub const PORTABLE_MARKER: &str = "portable.txt";
+
+/// Where a portable copy keeps its files: `data` next to the program, when
+/// [`PORTABLE_MARKER`] sits beside it.
+pub fn portable_dir_for(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join("data"))
+}
+
+/// The running copy's portable data folder, if it is portable.
+pub fn portable_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok().as_deref().and_then(portable_dir_for)
+}
+
+/// Directory for Shot's own files (settings, lock file): beside the program
+/// when portable, else the per-user app data folder.
 pub fn app_dir() -> PathBuf {
+    if let Some(d) = portable_dir() {
+        return d;
+    }
     if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("Shot")
     } else if cfg!(target_os = "macos") {
@@ -206,6 +225,17 @@ mod tests {
         assert_eq!(c.hotkey, d.hotkey);
         assert_eq!(c.style.size, MAX_SIZE);
         assert_eq!(c.style.color, d.style.color);
+    }
+
+    #[test]
+    fn portable_when_the_marker_sits_beside_the_program() {
+        let dir = std::env::temp_dir().join(format!("shot-portable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("Shot.exe");
+        assert_eq!(portable_dir_for(&exe), None);
+        std::fs::write(dir.join(PORTABLE_MARKER), b"").unwrap();
+        assert_eq!(portable_dir_for(&exe), Some(dir.join("data")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

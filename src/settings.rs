@@ -49,6 +49,8 @@ pub struct State {
     pub autostart: bool,
     /// Where Shot installs itself for start at login.
     pub install_path: String,
+    /// Running as a portable copy (settings beside the program).
+    pub portable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,10 +295,11 @@ impl View {
         let ay = l.auto_row.y as f32 + l.auto_row.h as f32 / 2.0;
         self.text_mid(pm, "Start Shot when I log in", px(40.0), ay, px(14.0), TEXT);
         toggle(pm, l.auto_toggle, self.state.autostart, sc);
-        let install = if self.state.autostart {
-            format!("Installed at {}", self.state.install_path)
-        } else {
-            "Installs Shot on this PC and runs it at every login.".to_string()
+        let install = match (self.state.portable, self.state.autostart) {
+            (true, true) => format!("Portable: runs {} at every login.", self.state.install_path),
+            (true, false) => "Portable: runs this copy at every login; nothing is installed.".to_string(),
+            (false, true) => format!("Installed at {}", self.state.install_path),
+            (false, false) => "Installs Shot on this PC and runs it at every login.".to_string(),
         };
         let install = self.ellipsize(&install, px(11.5), px(WIDTH - 80.0));
         self.text(pm, &install, px(40.0), px(l.install_y), px(11.5), MUTED);
@@ -422,6 +425,7 @@ mod tests {
             copy_on_save: false,
             autostart: false,
             install_path: r"C:\Users\someone\AppData\Local\Programs\Shot\Shot.exe".into(),
+            portable: false,
         };
         View::new(st, 1.0, None, None)
     }
