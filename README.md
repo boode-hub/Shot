@@ -1,182 +1,109 @@
-# Shot
+<p align="center">
+  <img src="docs/logo.png" width="120" alt="Shot logo: a three-tomoe Sharingan">
+</p>
 
-A tiny, fast screenshot tool written in Rust. Press **Shift + Space** (or any
-shortcut you choose), drag over what you want, mark it up, then **copy**,
-**save**, or **pin** it to the screen so you can keep reading it while you work
-in another window.
+<h1 align="center">Shot</h1>
 
-No GPU, no web view, no runtime: one small executable that sits in the tray.
+<p align="center">
+  <b>Snip it. Mark it. Blur it. Pin it.</b><br>
+  A tiny, fast screenshot tool for Windows, written in Rust.
+</p>
 
-## Features
+<p align="center">
+  <a href="#get-started"><img src="https://img.shields.io/badge/Windows-10%20%7C%2011-C30000?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 | 11"></a>
+  <a href="#build-from-source"><img src="https://img.shields.io/badge/Rust-1.99-8B0000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.99"></a>
+  <a href="#get-started"><img src="https://img.shields.io/badge/portable-1.6%20MB-5C0000?style=for-the-badge" alt="Portable, 1.6 MB"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-5C0000?style=for-the-badge" alt="MIT license"></a>
+  <a href="https://buymeacoffee.com/boode"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-E01B1B?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white" alt="Buy me a coffee"></a>
+</p>
 
-- **Capture:** all monitors at once, each at its native resolution and DPI.
-  Drag to select, **click a window** to grab just that window, or **Ctrl+A**
-  for the whole screen. Move the selection by dragging it or with the arrow
-  keys (Shift = 10 px), and resize it with the eight handles.
-- **Annotate:**
-  | Tool | Key | Notes |
-  |---|---|---|
-  | Move / resize | V | move and resize the selection |
-  | Pen | P | freehand; hold Shift for a straight line |
-  | Highlighter | H | real highlighter look: dark text stays readable; has its own colour (yellow) |
-  | Line | L | Shift snaps to 45° |
-  | Arrow | A | Shift snaps to 45° |
-  | Rectangle | R | Shift makes a square |
-  | Ellipse | E | Shift makes a circle |
-  | Text | T | click, type; Enter = new line, Esc or click elsewhere = done |
-  | Blur | B | drag over passwords, emails, account numbers… |
-  | Numbered steps | N | click to drop 1, 2, 3… |
+<p align="center">
+  <img src="docs/demo.gif" width="900" alt="Shot in action: select a dashboard, add an arrow, highlight a number, blur e-mail addresses, add numbered steps and text, then pin the result on top of another window">
+</p>
+<p align="center"><sub>A real recording: Shift + Space, select, mark up, blur, then pin it above the next window.</sub></p>
 
-  Colours: click the colour dot, or press **1–8**. Size: mouse **wheel** or
-  **[ ]**. **Ctrl+Z / Ctrl+Y** undo/redo. The last colour and size are
-  remembered.
-- **Finish:**
-  | Action | Keys |
-  |---|---|
-  | Copy to clipboard | Ctrl+C, Enter, or double-click the selection |
-  | Save | Ctrl+S (dialog or straight to folder, see settings) |
-  | Quick save to folder | Ctrl+Shift+S |
-  | **Pin to screen** | Ctrl+P or F3 |
-  | **Copy text (OCR)** | Ctrl+T |
-  | Cancel | Esc or right-click |
-- **Pins** stay on top of everything. Drag to move, wheel to zoom, **0** for
-  actual size, **Ctrl+C** copy, **Ctrl+S** save, **Ctrl+T** copy its text,
-  **Esc**/double-click/middle-click to close. Right-click for a menu (Windows
-  and macOS).
-- **OCR (copy text from a screenshot):** on Windows this uses the OCR engine
-  built into Windows 10/11 (the one the Snipping Tool uses), so nothing extra
-  to install. On Linux and macOS, Shot uses `tesseract` if it is installed.
-- **Tray icon** (the Sharingan): left-click to capture; right-click for
-  Settings, the screenshots folder, close all pins, quit.
-- **Settings window:** pick the capture shortcut (click *Change* and press the
-  keys), the screenshots folder, how the Save button behaves, and **Start Shot
-  when I log in**. It opens on first run, from the tray, or by starting Shot
-  again while it is already running.
+## Why Shot
 
-## Get it (Windows)
+- **One small file.** `Shot.exe` is 1.6 MB and portable: no installer, no runtime, no GPU needed.
+- **Instant.** Press **Shift + Space** and the screen freezes under your cursor; drawing a 4K frame takes 3–6 ms.
+- **Pin anything.** Keep a screenshot floating above every window while you read from it, type from it or compare.
+- **Copy the text.** Turn a screenshot into text with the OCR engine built into Windows.
+- **Private.** Blur what others should not see. Shot never connects to the internet.
 
-The repository includes a ready-made, portable **`Shot.exe`** (64-bit, no
-install, no dependencies). Get it with Git and run it:
+## Get started
 
-```
-git clone https://github.com/BOoDe007/Shot D:\SS\Shot
-D:\SS\Shot\Shot.exe
-```
+1. **Get it:** `git clone https://github.com/boode-hub/Shot`, or **Code → Download ZIP** and extract it.
+2. **Run** `Shot.exe`. The Settings window opens the first time, and the red eye appears by the clock.
+3. **Press Shift + Space**, drag over what you want, mark it up, then copy, save or pin it.
 
-Or put `build.ps1` in a folder and run
-`powershell -ExecutionPolicy Bypass -File D:\SS\Shot\build.ps1` (or
-double-click `build.cmd`): it gets or updates the repository (installing Git
-with winget if needed) and starts `Shot.exe`. Run it again any time to update.
+Turn on **Start Shot when I log in** in Settings to keep it running. To update, run `git pull` in the
+folder, or `build.ps1` (it pulls and restarts Shot).
 
-**Portable:** `Shot.exe` is a single file with nothing to install. A
-`portable.txt` next to it (included in the repository) makes Shot keep its
-settings in a `data` folder beside it instead of your user profile, and "Start
-Shot when I log in" then runs that copy where it is instead of installing one.
-Copy `Shot.exe` + `portable.txt` to any folder or USB stick and run it there;
-delete `portable.txt` to use the user profile instead.
+> [!NOTE]
+> Shot is not code-signed yet. If Windows shows *"Windows protected your PC"* for a downloaded copy,
+> choose **More info → Run anyway**. A copy you get with `git clone` is not marked as downloaded.
 
-A file that arrives through Git is not marked as downloaded from the internet,
-so Windows does not block it as an unknown program the way it does a browser
-download.
+**Portable:** the `portable.txt` next to `Shot.exe` makes Shot keep its settings in a `data` folder beside
+it and install nothing. Copy both files to any folder or USB stick; delete `portable.txt` to keep settings
+in your user profile instead.
 
-**Build it yourself instead:** `build.ps1 -FromSource` installs Rust (GNU
-toolchain, no Visual Studio) and LLVM's dlltool if needed, compiles on your PC
-and starts the result. The ready-made `Shot.exe` is built the same way:
-`cargo build --release --target x86_64-pc-windows-gnu` with the Rust version in
-`rust-toolchain.toml`.
+## Shortcuts
 
-The Settings window opens the first time. Turn on **Start Shot when I log in**
-to install it: Shot copies itself to
-`%LOCALAPPDATA%\Programs\Shot\Shot.exe`, adds itself to your start-up apps
-and to the Start Menu (no admin rights needed). Running a newer build later
-updates that installed copy automatically.
+**Capture** — drag to select, **click** a window to take just that window, **Ctrl + A** for the whole
+screen, or **Ctrl + C** straight away to copy what is highlighted. Drag the selection or use the arrow keys
+to move it, and the handles to resize it.
 
-### About Shift + Space
+| Tool | Key | | Tool | Key |
+|---|:-:|---|---|:-:|
+| Move / resize | **V** | | Rectangle | **R** |
+| Pen | **P** | | Ellipse | **E** |
+| Highlighter | **H** | | Text | **T** |
+| Line | **L** | | Blur | **B** |
+| Arrow | **A** | | Numbered steps | **N** |
 
-A global shortcut belongs to Shot everywhere, so while Shot runs, Shift + Space
-no longer types a space in other apps when Shift is held. If that gets in the
-way, pick something else in Settings (for example Print Screen or
-Ctrl + Shift + S). Windows can't tell left Shift from right Shift for global
-shortcuts, so both work. Only one app can own a shortcut; if another app has
-it, Settings says so.
+Colours **1–8** · size **mouse wheel** or **[ ]** · hold **Shift** for straight lines, squares and circles ·
+**Ctrl + Z / Ctrl + Y** undo and redo.
 
-## Command line
+| Finish | Keys |
+|---|---|
+| Copy | **Ctrl + C**, **Enter**, or double-click |
+| Save | **Ctrl + S** (quick save to the folder: **Ctrl + Shift + S**) |
+| Pin to the screen | **Ctrl + P** or **F3** |
+| Copy the text (OCR) | **Ctrl + T** |
+| Cancel | **Esc** or right-click |
+
+**Pins** stay on top: drag to move, **wheel** to zoom, **0** for actual size, **Ctrl + C / S / T** to copy,
+save or copy the text, **Esc** or double-click to close, right-click for a menu.
+
+## Settings
+
+Open them from the tray icon, or start `Shot.exe` again while it runs. Choose the capture shortcut (click
+**Change** and press the keys), the screenshots folder, what the Save button does, and whether Shot starts
+when you log in.
+
+## Build from source
+
+`build.ps1 -FromSource` does everything on Windows: it installs Rust (GNU toolchain, no Visual Studio) and
+LLVM's dlltool if they are missing, compiles, and starts the result. By hand, with the Rust version pinned
+in `rust-toolchain.toml`:
 
 ```
-shot              run in the tray (if already running: open its Settings)
-shot --capture    run in the tray and capture right away
-shot --settings   run in the tray and open Settings
-shot --once       capture now, quit when done (no tray, no shortcut)
+cargo build --release --target x86_64-pc-windows-gnu
+cargo test
 ```
 
-`--once` is handy for binding a key in your desktop's own shortcut settings
-(for example on Linux Wayland, where apps cannot grab global hotkeys).
+Every push is linted and tested on Windows and Linux, and when the code changes the ready-made `Shot.exe`
+is rebuilt and committed automatically. All drawing happens on the CPU (`tiny-skia` + `softbuffer`); the
+core editor has no window-system code and is unit-tested.
 
-## Linux and macOS
+## Support
 
-The code is cross-platform and compiles for all three. Linux (X11) is tested
-end to end. macOS compiles but is untested. On Linux, building needs:
-`libxkbcommon-dev libpipewire-0.3-dev libgbm-dev libegl-dev libwayland-dev libclang-dev`
-(the names vary by distribution). On Wayland, global hotkeys don't work; bind
-`shot --once` to a key instead.
+If Shot saves you time, a coffee keeps it going.
 
-## Layout
+<p align="center">
+  <a href="https://buymeacoffee.com/boode"><img src="docs/coffee.png" height="48" alt="Buy me a coffee"></a>
+</p>
 
-```
-src/
-  lib.rs        core library (no window system, fully unit-tested)
-  geom.rs       points and rectangles
-  style.rs      palette and UI colours
-  text.rs       system font loading and text drawing
-  annot.rs      annotation shapes, rendering, blur
-  toolbar.rs    toolbar layout, hit-testing, vector icons
-  editor.rs     the capture editor: selection, tools, undo, rendering
-  settings.rs   the Settings window's layout, drawing and clicks
-  hotkey.rs     shortcut recording, validation and display names
-  config.rs     settings storage
-  icon.rs       the Sharingan logo, drawn in code (+ .ico export)
-  main.rs       entry point, command line, single instance
-  shell/        desktop integration
-    app/mod.rs    event loop: shortcut, tray, overlays, toasts
-    app/pins.rs   pinned screenshots: input and right-click menu
-    app/settings.rs  capture shortcut and the Settings window
-    capture.rs    grab monitors and window rectangles (xcap)
-    present.rs    pixels to window (softbuffer, CPU only)
-    pin.rs        pin window drawing and zoom
-    settings_window.rs  the Settings window itself
-    toast.rs      "Copied to clipboard" messages
-    tray.rs       tray icon and menu
-    output.rs     clipboard, PNG files, Save / folder dialogs
-    ocr.rs        Windows OCR / tesseract
-    autostart.rs  install + start at login
-    ipc.rs        a second launch opens the running copy's Settings
-examples/
-  preview.rs           editor UI to PNGs (no display needed)
-  settings_preview.rs  Settings window to PNGs
-  logo.rs              logo PNGs and shot.ico
-  bench.rs             frame-time check at 4K
-.github/workflows/ci.yml   build, lint, test; downloadable shot.exe
-Shot.exe                   ready-made portable Windows build
-portable.txt               keeps Shot's settings beside Shot.exe (portable mode)
-build.ps1 / build.cmd      update from GitHub and start Shot (-FromSource: build it)
-rust-toolchain.toml        the one Rust version every build uses
-```
+## License
 
-All drawing is done on the CPU with `tiny-skia`, and pixels go to the screen
-with `softbuffer`. At 4K a frame takes about 3–6 ms (about 10 ms while
-dragging a large blur), and opening a capture takes about 25 ms per monitor.
-
-```
-cargo test                                  # core tests
-cargo run --example preview -- <out-dir>    # UI screenshots without a display
-cargo run --release --example bench         # 4K frame timings
-```
-
-## Ideas for later
-
-- Click an annotation to move, edit or delete it
-- Magnifier loupe with the pixel colour while selecting
-- Scrolling capture and screen recording (GIF/MP4)
-- Upload or share link
-- Embed the logo in `shot.exe` itself (`cargo run --example logo -- assets`
-  writes `shot.ico`; a small build script can attach it)
+[MIT](LICENSE) © 2026 boode-hub

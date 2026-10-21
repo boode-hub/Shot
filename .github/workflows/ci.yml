@@ -1,5 +1,6 @@
-# Every push: format, lint and test on Windows and Linux, then a release
-# build of shot.exe you can download from the run's "Artifacts" section.
+# Every push: format, lint and test on Windows and Linux. When the code
+# changed, rebuild the ready-made Shot.exe and commit it, so the copy in the
+# repository always matches the source and is usable straight after a pull.
 # (macOS is left out on purpose: private repos pay 10x for macOS minutes.)
 # Rust is pinned (also in rust-toolchain.toml) so a new release's lints
 # never turn the build red on their own.
@@ -25,11 +26,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: cargo build --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Shot-windows
-          path: target/release/shot.exe
 
   linux:
     runs-on: ubuntu-latest
@@ -44,3 +40,47 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # Shot.exe is built the same way as the copy users run: Rust 1.99, GNU
+  # toolchain, cross-compiled with MinGW. Only after both checks pass.
+  shot-exe:
+    needs: [windows, linux]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Did the code change?
+        id: changed
+        run: |
+          base="${{ github.event.before }}"
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then base="$(git rev-list --max-parents=0 HEAD | tail -1)"; fi
+          if git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(src/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No code changes; Shot.exe stays as it is."
+          fi
+      - if: steps.changed.outputs.build == 'true'
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - if: steps.changed.outputs.build == 'true'
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-gnu
+      - if: steps.changed.outputs.build == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.changed.outputs.build == 'true'
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+      - name: Commit the new Shot.exe
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          cp target/x86_64-pc-windows-gnu/release/shot.exe Shot.exe
+          if git diff --quiet -- Shot.exe; then echo "Shot.exe unchanged"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Shot.exe
+          git commit -m "Rebuild Shot.exe from ${GITHUB_SHA::7}"
+          git pull --rebase origin main
+          git push origin HEAD:main

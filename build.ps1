@@ -39,7 +39,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $Root = $PSScriptRoot
-$Repo = 'https://github.com/BOoDe007/Shot.git'
+# Used only to set up a folder that is not a Git copy yet; an existing copy
+# keeps pulling from its own origin.
+$Repo = 'https://github.com/boode-hub/Shot.git'
 $Toolchain = '1.99.0-x86_64-pc-windows-gnu'
 $CargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 
