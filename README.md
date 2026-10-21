@@ -55,21 +55,34 @@ No GPU, no web view, no runtime: one small executable that sits in the tray.
 
 ## Get it (Windows)
 
-**Ready-made:** every push builds `shot.exe` on GitHub. Open the repo's
-**Actions** tab → latest **CI** run → **Artifacts** → *Shot-windows*.
+**One script does everything.** Put `build.ps1` (and, if you like,
+`build.cmd`) in an empty folder such as `D:\SS\Shot`, then either
+double-click `build.cmd`, or run:
 
-**Or build it:**
+```
+powershell -ExecutionPolicy Bypass -File D:\SS\Shot\build.ps1
+```
 
-1. Install Rust from <https://rustup.rs> (take the default MSVC option; it
-   installs the Visual Studio build tools if they are missing).
-2. In this folder: `cargo build --release`
-3. Run `target\release\shot.exe`.
+It gets the latest code from GitHub (installing Git with winget if needed;
+the first time Git asks you to sign in), installs Rust if needed, builds
+`Shot.exe` in that folder and starts it. No Visual Studio needed: it uses
+Rust's GNU toolchain, which brings its own linker. The first build takes a
+few minutes; run the script again any time to update (`-NoRun` builds only,
+`-NoUpdate` skips GitHub).
+
+Because `Shot.exe` is built on your PC instead of downloaded, Windows does not
+block it as an unknown program from the internet. (Smart App Control or a
+company policy that blocks *every* unsigned program would also block programs
+built locally; the script says so if that happens.)
+
+**Ready-made:** every push also builds `shot.exe` on GitHub (Actions tab →
+latest CI run → Artifacts).
 
 The Settings window opens the first time. Turn on **Start Shot when I log in**
 to install it: Shot copies itself to
 `%LOCALAPPDATA%\Programs\Shot\Shot.exe`, adds itself to your start-up apps
 and to the Start Menu (no admin rights needed). Running a newer build later
-updates that installed copy automatically (quit the running Shot first).
+updates that installed copy automatically.
 
 ### About Shift + Space
 
@@ -136,6 +149,8 @@ examples/
   logo.rs              logo PNGs and shot.ico
   bench.rs             frame-time check at 4K
 .github/workflows/ci.yml   build, lint, test; downloadable shot.exe
+build.ps1 / build.cmd      get the code, install Rust, build and start Shot
+rust-toolchain.toml        the one Rust version every build uses
 ```
 
 All drawing is done on the CPU with `tiny-skia`, and pixels go to the screen
