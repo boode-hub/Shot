@@ -1,22 +1,28 @@
 <#
 .SYNOPSIS
-    Builds Shot on this PC and starts it. Run it again any time to update.
+    Updates Shot from GitHub and starts it. Run it again any time to update.
 
 .DESCRIPTION
-    1. Gets the latest Shot code from GitHub (installs Git with winget if it is
+    1. Gets the latest Shot from GitHub (installs Git with winget if it is
        missing; the first time, Git asks you to sign in to GitHub).
-    2. Installs Rust if it is missing, plus LLVM's dlltool (one time). Uses
-       Rust's GNU toolchain, so Visual Studio is not needed.
-    3. Builds Shot.exe in this folder and starts it.
+    2. Starts the ready-made, portable Shot.exe that comes with it.
 
-    Shot.exe is compiled here rather than downloaded, so Windows does not treat
-    it as an unknown program from the internet.
+    Shot.exe arrives through Git rather than a browser download, so Windows
+    does not treat it as an unknown program from the internet.
+
+    With -FromSource it builds Shot.exe on this PC instead: installs Rust and
+    LLVM's dlltool if missing (Rust's GNU toolchain, no Visual Studio needed),
+    compiles, and starts the result.
 
 .PARAMETER NoUpdate
-    Build the code already in this folder; don't pull from GitHub.
+    Don't pull from GitHub; use what is already in this folder.
 
 .PARAMETER NoRun
-    Build only; don't start Shot.
+    Don't start Shot.
+
+.PARAMETER FromSource
+    Build Shot.exe from the source code on this PC instead of using the
+    ready-made one.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File D:\SS\Shot\build.ps1
@@ -24,7 +30,8 @@
 [CmdletBinding()]
 param(
     [switch]$NoUpdate,
-    [switch]$NoRun
+    [switch]$NoRun,
+    [switch]$FromSource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +64,37 @@ function Invoke-Checked([string]$Exe, [string[]]$Arguments, [string]$Hint = '') 
     }
 }
 
+# A running Shot keeps Shot.exe locked, so it could not be updated or rebuilt.
+function Stop-Shot {
+    Get-Process -Name shot -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Milliseconds 400
+}
+
+function Start-Shot([string]$Exe) {
+    if ($NoRun) { return }
+    Step 'Starting Shot'
+    try {
+        Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe)
+    }
+    catch {
+        Fail "Windows would not start Shot.exe: $($_.Exception.Message)"
+    }
+    Write-Host 'Shot is running: the red eye icon is by the clock (click ^ if hidden).' -ForegroundColor Green
+    Write-Host 'Press Shift+Space to capture. Turn on "Start Shot when I log in" in Settings to keep it.'
+}
+
+# Download with Windows' own curl.exe (fast, shows progress); fall back to
+# Invoke-WebRequest on systems without it.
+function Get-File([string]$Uri, [string]$OutFile) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (Test-Path $curl) {
+        Invoke-Checked $curl @('-L', '--fail', '--retry', '3', '--progress-bar', '-o', $OutFile, $Uri)
+    }
+    else {
+        Invoke-WebRequest -UseBasicParsing -OutFile $OutFile -Uri $Uri
+    }
+}
+
 # Pick up programs that installers just added to PATH.
 function Update-SessionPath {
     $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -66,6 +104,7 @@ function Update-SessionPath {
 
 # --- 1. Code ------------------------------------------------------------------
 
+Stop-Shot
 if (-not $NoUpdate) {
     Step 'Getting the latest Shot code'
     if (-not (Test-Command git)) {
@@ -108,24 +147,36 @@ if (-not $NoUpdate) {
         Write-Host 'build.ps1 was updated; continuing with the new version.'
         $relay = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-NoUpdate')
         if ($NoRun) { $relay += '-NoRun' }
+        if ($FromSource) { $relay += '-FromSource' }
         & (Get-Process -Id $PID).Path @relay
         exit $LASTEXITCODE
     }
 }
 
+# --- 2. Ready-made Shot.exe ------------------------------------------------------
+
+if (-not $FromSource) {
+    $exe = Join-Path $Root 'Shot.exe'
+    if (-not (Test-Path $exe)) {
+        Fail "Shot.exe is not in $Root yet. Run the script without -NoUpdate, or with -FromSource to build it."
+    }
+    Start-Shot $exe
+    exit 0
+}
+
+# --- 3. Build from source (-FromSource) -----------------------------------------
+
 if (-not (Test-Path (Join-Path $Root 'Cargo.toml'))) {
     Fail "There is no Shot source code in $Root. Run the script without -NoUpdate."
 }
 
-# --- 2. Rust --------------------------------------------------------------------
 
 Step 'Checking Rust'
 if (Test-Path $CargoBin) { $env:Path = "$CargoBin;$env:Path" }
 if (-not (Test-Command rustup)) {
     Write-Host 'Installing Rust (one time, a few hundred MB)...'
     $init = Join-Path $env:TEMP 'rustup-init.exe'
-    Invoke-WebRequest -UseBasicParsing -OutFile $init `
-        -Uri 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-gnu/rustup-init.exe'
+    Get-File 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-gnu/rustup-init.exe' $init
     Invoke-Checked $init @('-y', '--default-host', 'x86_64-pc-windows-gnu', '--default-toolchain', 'none', '--profile', 'minimal')
     Remove-Item $init -ErrorAction SilentlyContinue
     $env:Path = "$CargoBin;$env:Path"
@@ -171,8 +222,7 @@ if (-not (Test-Tools)) {
     Write-Host 'Downloading LLVM dlltool (one time, about 190 MB download, 80 MB kept)...'
     New-Item -ItemType Directory -Force -Path $Tools | Out-Null
     $zip = Join-Path $env:TEMP "$LlvmMingw.zip"
-    Invoke-WebRequest -UseBasicParsing -OutFile $zip `
-        -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/20260311/$LlvmMingw.zip"
+    Get-File "https://github.com/mstorsjo/llvm-mingw/releases/download/20260311/$LlvmMingw.zip" $zip
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
     try {
@@ -193,8 +243,6 @@ if (-not (Test-Tools)) {
 }
 $env:Path = "$Tools;$mingw;$env:Path"
 
-# --- 3. Build -------------------------------------------------------------------
-
 Step 'Building Shot (the first build takes a few minutes, later ones seconds)'
 $blocked = "`nIf it says 'An Application Control policy has blocked this file' (os error 4551), " +
     'Smart App Control or a company policy blocks every program built on this PC, not only Shot.'
@@ -205,26 +253,9 @@ try {
 finally {
     Pop-Location
 }
+# Run the fresh build where it is; the ready-made Shot.exe stays as it came
+# from GitHub so later updates never conflict with it.
 $built = Join-Path $Root 'target\release\shot.exe'
 if (-not (Test-Path $built)) { Fail "The build finished but $built is missing." }
-
-# A running Shot (including the copy that starts at login) locks the file.
-Get-Process -Name shot -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 400
-$exe = Join-Path $Root 'Shot.exe'
-Copy-Item $built $exe -Force
-Write-Host "Built $exe" -ForegroundColor Green
-
-# --- 4. Run ---------------------------------------------------------------------
-
-if (-not $NoRun) {
-    Step 'Starting Shot'
-    try {
-        Start-Process -FilePath $exe -WorkingDirectory $Root
-    }
-    catch {
-        Fail "Windows would not start Shot.exe: $($_.Exception.Message)$blocked"
-    }
-    Write-Host 'Shot is running: the red eye icon is by the clock (click ^ if hidden).' -ForegroundColor Green
-    Write-Host 'Press Shift+Space to capture. Turn on "Start Shot when I log in" in Settings to keep it.'
-}
+Write-Host "Built $built" -ForegroundColor Green
+Start-Shot $built

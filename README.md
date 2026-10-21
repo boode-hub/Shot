@@ -55,28 +55,28 @@ No GPU, no web view, no runtime: one small executable that sits in the tray.
 
 ## Get it (Windows)
 
-**One script does everything.** Put `build.ps1` (and, if you like,
-`build.cmd`) in an empty folder such as `D:\SS\Shot`, then either
-double-click `build.cmd`, or run:
+The repository includes a ready-made, portable **`Shot.exe`** (64-bit, no
+install, no dependencies). Get it with Git and run it:
 
 ```
-powershell -ExecutionPolicy Bypass -File D:\SS\Shot\build.ps1
+git clone https://github.com/BOoDe007/Shot D:\SS\Shot
+D:\SS\Shot\Shot.exe
 ```
 
-It gets the latest code from GitHub (installing Git with winget if needed;
-the first time Git asks you to sign in), installs Rust if needed, builds
-`Shot.exe` in that folder and starts it. No Visual Studio needed: it uses
-Rust's GNU toolchain, which brings its own linker. The first build takes a
-few minutes; run the script again any time to update (`-NoRun` builds only,
-`-NoUpdate` skips GitHub).
+Or put `build.ps1` in a folder and run
+`powershell -ExecutionPolicy Bypass -File D:\SS\Shot\build.ps1` (or
+double-click `build.cmd`): it gets or updates the repository (installing Git
+with winget if needed) and starts `Shot.exe`. Run it again any time to update.
 
-Because `Shot.exe` is built on your PC instead of downloaded, Windows does not
-block it as an unknown program from the internet. (Smart App Control or a
-company policy that blocks *every* unsigned program would also block programs
-built locally; the script says so if that happens.)
+A file that arrives through Git is not marked as downloaded from the internet,
+so Windows does not block it as an unknown program the way it does a browser
+download.
 
-**Ready-made:** every push also builds `shot.exe` on GitHub (Actions tab →
-latest CI run → Artifacts).
+**Build it yourself instead:** `build.ps1 -FromSource` installs Rust (GNU
+toolchain, no Visual Studio) and LLVM's dlltool if needed, compiles on your PC
+and starts the result. The ready-made `Shot.exe` is built the same way:
+`cargo build --release --target x86_64-pc-windows-gnu` with the Rust version in
+`rust-toolchain.toml`.
 
 The Settings window opens the first time. Turn on **Start Shot when I log in**
 to install it: Shot copies itself to
@@ -149,7 +149,8 @@ examples/
   logo.rs              logo PNGs and shot.ico
   bench.rs             frame-time check at 4K
 .github/workflows/ci.yml   build, lint, test; downloadable shot.exe
-build.ps1 / build.cmd      get the code, install Rust, build and start Shot
+Shot.exe                   ready-made portable Windows build
+build.ps1 / build.cmd      update from GitHub and start Shot (-FromSource: build it)
 rust-toolchain.toml        the one Rust version every build uses
 ```
 
