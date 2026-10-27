@@ -2054,7 +2054,13 @@ namespace Shot
             m.Items.Add("Close all pins", null, (s, e) => CloseAllPins());
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add("Quit Shot", null, (s, e) => Quit());
-            tray = new NotifyIcon { Icon = AppIcon, ContextMenuStrip = m, Visible = true };
+            tray = new NotifyIcon { Icon = AppIcon, ContextMenuStrip = m };
+            // Windows remembers tray icons by program and icon number. Every PowerShell tray app
+            // (Sharingan Monitor too) is powershell.exe with icon 1, so give Shot a number of its own:
+            // then "show or hide in the taskbar" is Shot's own setting.
+            var id = typeof(NotifyIcon).GetField("id", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (id != null) id.SetValue(tray, 0x5307);
+            tray.Visible = true;
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) StartCapture(); };
             UpdateTray();
         }
