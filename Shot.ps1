@@ -108,6 +108,20 @@ namespace Shot
         public const float Dim = 0.45f;
 
         public static Color Contrast(Color c) { return 0.299 * c.R + 0.587 * c.G + 0.114 * c.B > 160 ? Color.Black : Color.White; }
+        /// Fully saturated colour at `deg` degrees around the colour wheel.
+        public static Color Hue(int deg)
+        {
+            int f = (int)(255 * (deg % 60) / 60f), q = 255 - f;
+            switch (deg / 60 % 6)
+            {
+                case 0: return Color.FromArgb(255, f, 0);
+                case 1: return Color.FromArgb(q, 255, 0);
+                case 2: return Color.FromArgb(0, 255, f);
+                case 3: return Color.FromArgb(0, q, 255);
+                case 4: return Color.FromArgb(f, 0, 255);
+                default: return Color.FromArgb(255, 0, q);
+            }
+        }
         public static string ToHex(Color c) { return string.Format("#{0:x2}{1:x2}{2:x2}", c.R, c.G, c.B); }
         public static bool TryHex(string s, out Color c)
         {
@@ -369,6 +383,8 @@ namespace Shot
         /// The highlighter keeps its own colour so it stays yellow by default.
         public Color Marker = Ui.Palette[2];
         public int Size = 2;
+        /// The colour panel's 16 custom slots, as ColorDialog keeps them (0x00BBGGRR).
+        public int[] CustomColors = new int[0];
         public const int MaxSize = 10;
 
         public static Config Parse(string text)
@@ -391,6 +407,11 @@ namespace Shot
                     case "color": if (Ui.TryHex(v, out col)) c.Color = col; break;
                     case "highlighter": if (Ui.TryHex(v, out col)) c.Marker = col; break;
                     case "size": if (int.TryParse(v, out n)) c.Size = Ui.Clamp(n, 1, MaxSize); break;
+                    case "custom_colors":
+                        var list = new List<int>();
+                        foreach (string h in v.Split(',')) if (list.Count < 16 && Ui.TryHex(h, out col)) list.Add(col.R | col.G << 8 | col.B << 16);
+                        c.CustomColors = list.ToArray();
+                        break;
                 }
             }
             return c;
@@ -404,7 +425,8 @@ namespace Shot
                 "# ask = show a Save dialog; folder = save straight into save_dir\r\nsave_mode = " + (AskWhere ? "ask" : "folder") + "\r\n" +
                 "# Also copy the image to the clipboard when saving (true/false)\r\ncopy_on_save = " + (CopyOnSave ? "true" : "false") + "\r\n\r\n" +
                 "# Last used drawing style (updated automatically).\r\ncolor = " + Ui.ToHex(Color) + "\r\nhighlighter = " + Ui.ToHex(Marker) +
-                "\r\nsize = " + Size + "\r\n";
+                "\r\nsize = " + Size + "\r\ncustom_colors = " + string.Join(",", Array.ConvertAll(CustomColors,
+                    v => Ui.ToHex(Color.FromArgb(v & 255, (v >> 8) & 255, (v >> 16) & 255)))) + "\r\n";
         }
 
         public static Config Load(string path, out bool first)
@@ -619,12 +641,13 @@ namespace Shot
             }
             if (palette)
             {
-                int pw = 8 * btn + pad * 2, under = b.Rect.Bottom + s(4);
+                int pw = 9 * btn + pad * 2, under = b.Rect.Bottom + s(4);
                 int px = Ui.Clamp(b.RectOf(10).X - pad, scr.X, Math.Max(scr.X, scr.Right - pw));
                 int py = b.Rect.Y > sel.Y && under + h <= scr.Bottom ? under : Math.Max(b.Rect.Y - s(4) - h, scr.Y);
                 b.HasPal = true;
                 b.Pal = new Rectangle(px, py, pw, h);
-                for (int i = 0; i < 8; i++) { b.Items.Add(20 + i); b.Rects.Add(new Rectangle(px + pad + i * btn, py + pad, btn, btn)); }
+                // Swatches 20-27, then 28: any colour, from the full colour panel.
+                for (int i = 0; i < 9; i++) { b.Items.Add(20 + i); b.Rects.Add(new Rectangle(px + pad + i * btn, py + pad, btn, btn)); }
             }
             return b;
         }
@@ -641,7 +664,8 @@ namespace Shot
         {
             string[] names = { "Move / resize", "Pen", "Highlighter", "Line", "Arrow", "Rectangle", "Ellipse", "Text", "Blur", "Numbered step" };
             if (it < 10) return names[it] + "  (" + char.ToUpper(ToolKeys[it]) + ")";
-            if (it == 10) return "Colour  (1-8)  \u00b7  size: wheel or [ ]";
+            if (it == 10) return "Colour  (1-8, 0 = any)  \u00b7  size: wheel or [ ]";
+            if (it == 28) return "Any colour\u2026  (0)";
             if (it < 30) return "Colour " + (it - 19);
             string[] actions = { "Undo  (Ctrl+Z)", "Redo  (Ctrl+Y)", "Copy text (OCR)  (Ctrl+T)", "Pin to screen  (Ctrl+P)", "Save  (Ctrl+S)", "Copy  (Ctrl+C / Enter)", "Close  (Esc)" };
             return actions[it - 30];
@@ -789,6 +813,21 @@ namespace Shot
         {
             if (!HasSel || drag == Drag.Selecting) return null;
             return Bar.Layout(Sel, Mon(FocusPt()), Sc(), paletteOpen);
+        }
+
+        /// The full Windows colour panel: a spectrum, any RGB or HSL value, and 16
+        /// custom slots that Shot remembers.
+        void PickColor()
+        {
+            paletteOpen = false;
+            using (var d = new ColorDialog { FullOpen = true, AnyColor = true, Color = CurColor(), CustomColors = App.Cfg.CustomColors })
+            {
+                if (d.ShowDialog(this) == DialogResult.OK) SetColor(Color.FromArgb(255, d.Color));
+                App.Cfg.CustomColors = d.CustomColors;
+                App.SaveConfig();
+            }
+            Activate();
+            Invalidate();
         }
 
         static Point ClampTo(Rectangle r, Point p) { return new Point(Ui.Clamp(p.X, r.X, r.Right), Ui.Clamp(p.Y, r.Y, r.Bottom)); }
@@ -1043,6 +1082,7 @@ namespace Shot
                 int t = Bar.ToolKeys.IndexOf(c);
                 if (t >= 0) SetTool((Tool)t);
                 else if (c >= '1' && c <= '8') SetColor(Ui.Palette[c - '1']);
+                else if (c == '0') PickColor();
                 else if (c == '[') Wheel(-1);
                 else if (c == ']') Wheel(1);
             }
@@ -1065,6 +1105,7 @@ namespace Shot
         {
             if (item < 10) SetTool((Tool)item);
             else if (item == 10) paletteOpen = !paletteOpen;
+            else if (item == 28) PickColor();
             else if (item < 30) { SetColor(Ui.Palette[item - 20]); paletteOpen = false; }
             else
             {
@@ -1370,10 +1411,18 @@ namespace Shot
                 var r = bar.Rects[i];
                 if (item >= 20 && item < 30)
                 {
-                    var col = Ui.Palette[item - 20];
                     float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, rad = r.Width * 0.28f;
-                    bool selected = col.ToArgb() == CurColor().ToArgb();
-                    using (var b = new SolidBrush(col)) g.FillEllipse(b, cx - rad, cy - rad, 2 * rad, 2 * rad);
+                    bool custom = Array.FindIndex(Ui.Palette, p => p.ToArgb() == CurColor().ToArgb()) < 0;
+                    bool selected = item == 28 ? custom : Ui.Palette[item - 20].ToArgb() == CurColor().ToArgb();
+                    if (item < 28) using (var b = new SolidBrush(Ui.Palette[item - 20])) g.FillEllipse(b, cx - rad, cy - rad, 2 * rad, 2 * rad);
+                    else
+                    {
+                        // A colour wheel, with the current colour in the middle when it is a custom one.
+                        for (int h = 0; h < 360; h += 30)
+                            using (var b = new SolidBrush(Ui.Hue(h))) g.FillPie(b, cx - rad, cy - rad, 2 * rad, 2 * rad, h - 90, 31);
+                        float inner = rad * 0.5f;
+                        using (var b = new SolidBrush(custom ? CurColor() : Ui.BarBg)) g.FillEllipse(b, cx - inner, cy - inner, 2 * inner, 2 * inner);
+                    }
                     using (var pen = new Pen(selected || hover == item ? Ui.Icon : Color.FromArgb(70, 255, 255, 255), (selected ? 2.5f : 1f) * r.Width / 34f))
                         g.DrawEllipse(pen, cx - rad, cy - rad, 2 * rad, 2 * rad);
                     continue;
@@ -2347,10 +2396,12 @@ namespace Shot
             check(!Shortcut.Parse("Ctrl+Nope", out mods, out vk), "unknown key refused");
             check(Shortcut.CodeOf(Keys.S) == "KeyS" && Shortcut.CodeOf(Keys.D1) == "Digit1", "key codes");
 
-            var c = new Config { Hotkey = "Ctrl+Shift+KeyA", AskWhere = false, CopyOnSave = true, Size = 7, Color = Ui.Palette[4], Marker = Ui.Palette[3] };
+            var c = new Config { Hotkey = "Ctrl+Shift+KeyA", AskWhere = false, CopyOnSave = true, Size = 7, Color = Ui.Hex(0x123456), Marker = Ui.Palette[3], CustomColors = new[] { 0x563412, 0xFFFFFF } };
             var d = Config.Parse(c.Render());
             check(d.Hotkey == c.Hotkey && !d.AskWhere && d.CopyOnSave && d.Size == 7 && d.SaveDir == c.SaveDir
-                && d.Color.ToArgb() == c.Color.ToArgb() && d.Marker.ToArgb() == c.Marker.ToArgb(), "config round trip");
+                && d.Color.ToArgb() == c.Color.ToArgb() && d.Marker.ToArgb() == c.Marker.ToArgb()
+                && d.CustomColors.Length == 2 && d.CustomColors[0] == 0x563412 && d.CustomColors[1] == 0xFFFFFF, "config round trip");
+            check(Ui.Hue(0) == Color.FromArgb(255, 0, 0) && Ui.Hue(120).ToArgb() == Color.FromArgb(0, 255, 0).ToArgb(), "colour wheel hues");
             var j = Config.Parse("hotkey =\nsize = 99\ncolor = nope\nno equals sign\n");
             check(j.Hotkey == Shortcut.Default && j.Size == Config.MaxSize && j.Color == Ui.Palette[0], "junk config falls back");
 

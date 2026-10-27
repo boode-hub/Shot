@@ -57,7 +57,8 @@ to move it, and the handles to resize it.
 | Line | **L** | | Blur | **B** |
 | Arrow | **A** | | Numbered steps | **N** |
 
-Colours **1–8** · size **mouse wheel** or **[ ]** · hold **Shift** for straight lines, squares and circles ·
+Colours **1–8**, or **0** (the colour wheel in the palette) for any colour: the full Windows colour panel
+with a spectrum, RGB / HSL values and 16 custom slots Shot remembers · size **mouse wheel** or **[ ]** · hold **Shift** for straight lines, squares and circles ·
 **Ctrl + Z / Ctrl + Y** undo and redo.
 
 | Finish | Keys |
