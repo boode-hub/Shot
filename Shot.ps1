@@ -65,6 +65,9 @@ namespace Shot
         [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll")] public static extern short GetKeyState(int vk);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint size);
+        [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint header);
+        [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTDEVICE { public ushort Page, Usage; public uint Flags; public IntPtr Target; }
         [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
         [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 
@@ -1686,13 +1689,102 @@ namespace Shot
         protected override void OnFormClosed(FormClosedEventArgs e) { timer.Dispose(); base.OnFormClosed(e); }
     }
 
+    /// Double-tap Ctrl: every screen goes half dark except a circle of light around the cursor.
+    /// Clicks go straight through it.
+    class Spotlight : Form
+    {
+        readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 15 };
+        Point last = new Point(int.MinValue, 0);
+
+        public Spotlight()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            AutoScaleMode = AutoScaleMode.None;
+            ShowInTaskbar = false;
+            BackColor = Color.Black;
+            Opacity = 0.5;
+            Bounds = SystemInformation.VirtualScreen;
+            timer.Tick += (s, e) => Follow();
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        {
+            // Topmost, click-through, no taskbar button, never takes the focus.
+            get { var cp = base.CreateParams; cp.ExStyle |= 0x080000A8; return cp; }
+        }
+        protected override void OnShown(EventArgs e) { Follow(); timer.Start(); base.OnShown(e); }
+
+        // The window is a dark sheet with a round hole that follows the cursor.
+        void Follow()
+        {
+            var p = Cursor.Position;
+            if (p == last) return;
+            last = p;
+            float r = 150 * Native.ScaleAt(p);
+            using (var path = new GraphicsPath())
+            {
+                path.AddRectangle(new Rectangle(0, 0, Width, Height));
+                path.AddEllipse(p.X - Left - r, p.Y - Top - r, 2 * r, 2 * r);
+                var old = Region;
+                Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e) { timer.Dispose(); base.OnFormClosed(e); }
+    }
+
+    /// Spots a double tap of Ctrl: two presses of Ctrl alone within the double-click time.
+    /// Any other key or a click in between (Ctrl+C, Ctrl+click) spoils it.
+    class CtrlTaps
+    {
+        bool down, clean, tapped;
+        uint lastTap;
+
+        /// Feed every key event; true on the second tap.
+        internal bool Key(int vk, bool isDown, uint time, uint within)
+        {
+            if (vk != 0x11 && vk != 0xA2 && vk != 0xA3) { Spoil(); return false; }
+            if (isDown) { if (!down) { down = true; clean = true; } return false; }
+            down = false;
+            if (!clean) return false;
+            if (tapped && time - lastTap <= within) { tapped = false; return true; }
+            tapped = true;
+            lastTap = time;
+            return false;
+        }
+
+        internal void Spoil() { clean = false; tapped = false; }
+    }
+
     /// Never shown: receives the global shortcut and runs work on the UI thread.
     class Host : Form
     {
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x0312) App.StartCapture();
+            if (m.Msg == 0x00FF) RawInput(m.LParam);
             base.WndProc(ref m);
+        }
+
+        // WM_INPUT: a copy of every key and mouse event, for the double tap of Ctrl.
+        static void RawInput(IntPtr h)
+        {
+            uint size = 0, head = (uint)(8 + 2 * IntPtr.Size);
+            Native.GetRawInputData(h, 0x10000003, IntPtr.Zero, ref size, head);
+            if (size < head + 8) return;
+            var buf = Marshal.AllocHGlobal((int)size);
+            try
+            {
+                if (Native.GetRawInputData(h, 0x10000003, buf, ref size, head) != size) return;
+                int type = Marshal.ReadInt32(buf);
+                // RAWKEYBOARD: MakeCode, Flags (1 = released), Reserved, VKey. RAWMOUSE: usFlags, pad, usButtonFlags.
+                if (type == 1) App.OnRawKey(Marshal.ReadInt16(buf, (int)head + 6) & 0xFFFF, (Marshal.ReadInt16(buf, (int)head + 2) & 1) == 0);
+                else if (type == 0 && (Marshal.ReadInt16(buf, (int)head + 4) & 0xFFFF) != 0) App.OnRawClick();
+            }
+            finally { Marshal.FreeHGlobal(buf); }
         }
     }
 
@@ -1971,7 +2063,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.0.0";
+        public const string Version = "2.1.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -1990,6 +2082,8 @@ namespace Shot
         static Overlay overlay;
         static Toast toast;
         static SettingsForm settings;
+        static Spotlight spotlight;
+        static readonly CtrlTaps taps = new CtrlTaps();
 
         public static void Run(string rootDir, bool captureNow, bool openSettings)
         {
@@ -2022,6 +2116,7 @@ namespace Shot
             else if (fallback) ShowToast(Shortcut.Pretty(wanted) + " is used by another app, so Shot uses " + Shortcut.Pretty(ActiveHotkey) + ". Change it in Settings.", 5);
             else if (!captureNow) ShowToast("Shot is running. Press " + Shortcut.Pretty(ActiveHotkey) + " to capture.", 2.5f);
             if (captureNow) host.BeginInvoke((Action)StartCapture);
+            WatchCtrl();
 
             Application.Run();
             tray.Visible = false;
@@ -2180,13 +2275,42 @@ namespace Shot
 
         internal static void CloseAllPins() { foreach (var p in Pins.ToArray()) p.Close(); }
 
+        // ----- spotlight -------------------------------------------------------------------
+
+        /// Raw input: Windows copies every key and click to the Host window, even when another
+        /// app has the focus. Shot only looks; nothing is held back from other apps.
+        static void WatchCtrl()
+        {
+            var d = new[] {
+                new Native.RAWINPUTDEVICE { Page = 1, Usage = 6, Flags = 0x100, Target = host.Handle },
+                new Native.RAWINPUTDEVICE { Page = 1, Usage = 2, Flags = 0x100, Target = host.Handle } };
+            Native.RegisterRawInputDevices(d, 2, (uint)Marshal.SizeOf(typeof(Native.RAWINPUTDEVICE)));
+        }
+
+        internal static void OnRawKey(int vk, bool down)
+        {
+            if (taps.Key(vk, down, (uint)Environment.TickCount, (uint)SystemInformation.DoubleClickTime)) ToggleSpotlight();
+            else if (down && vk == 0x1B && spotlight != null) ToggleSpotlight();
+        }
+
+        // Any button or wheel: Ctrl+click and Ctrl+wheel are not taps.
+        internal static void OnRawClick() { taps.Spoil(); }
+
+        internal static void ToggleSpotlight()
+        {
+            if (spotlight != null) { spotlight.Close(); spotlight = null; }
+            else if (overlay == null) { spotlight = new Spotlight(); spotlight.Show(); }
+        }
+
         internal static void StartCapture()
         {
             if (overlay != null || host == null) return;
             if (toast != null) toast.Close();
-            // Pins must not end up in the screenshot; give the compositor a moment.
+            // Pins and the spotlight must not end up in the screenshot; give the compositor a moment.
+            bool hide = Pins.Count > 0 || spotlight != null;
+            if (spotlight != null) ToggleSpotlight();
             foreach (var p in Pins) p.Visible = false;
-            if (Pins.Count > 0) Thread.Sleep(80);
+            if (hide) Thread.Sleep(80);
             Bitmap shot;
             var v = SystemInformation.VirtualScreen;
             try
@@ -2501,6 +2625,17 @@ namespace Shot
                 check(e.MouseDownAt(MouseButtons.Right, new Point(10, 10)) == Cmd.None && !e.HasSel, "right-click drops the selection");
                 check(e.MouseDownAt(MouseButtons.Right, new Point(10, 10)) == Cmd.Cancel, "then cancels");
             }
+            var t = new CtrlTaps();
+            Func<int, bool, uint, bool> key = (code, down, ms) => t.Key(code, down, ms, 500);
+            key(0xA2, true, 0); key(0xA2, true, 30); key(0xA2, false, 80); key(0xA2, true, 200);
+            check(key(0xA2, false, 260), "double Ctrl turns the spotlight on");
+            key(0xA2, true, 1000); key(0xA2, false, 1050); key(0xA2, true, 1700);
+            check(!key(0xA2, false, 1760), "slow taps do nothing");
+            key(0xA3, true, 2000); key(0x43, true, 2010); key(0xA3, false, 2050); key(0xA3, true, 2100);
+            check(!key(0xA3, false, 2150), "Ctrl+C is not a tap");
+            key(0xA2, true, 3000); key(0xA2, false, 3050); t.Spoil(); key(0xA2, true, 3100);
+            check(!key(0xA2, false, 3150), "a click in between spoils it");
+
             using (var logo = Ui.Logo(64))
                 check(logo.GetPixel(32, 32).ToArgb() == Color.Black.ToArgb() && logo.GetPixel(0, 0).A == 0, "logo draws");
             return fails.Count == 0 ? "ok" : "FAILED: " + string.Join("; ", fails.ToArray());
