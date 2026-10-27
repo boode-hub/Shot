@@ -38,6 +38,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -2059,16 +2060,727 @@ namespace Shot
         }
     }
 
+    // ----- reading text (OCR) ----------------------------------------------------------------------
+
+    /// A line of text and where it was found, in the screenshot's own pixels.
+    class OcrLine
+    {
+        public RectangleF Box;
+        public string Text;
+        public OcrLine(RectangleF box, string text) { Box = box; Text = text; }
+    }
+
+    /// One reading: how the picture was prepared for Windows OCR, and what it saw.
+    class OcrPass
+    {
+        public string Name;
+        public List<OcrLine> Lines;
+    }
+
+    /// Reads text the careful way. The screenshot goes to Windows OCR several times, prepared
+    /// differently each time (enlarged to the letter size it reads best, grey, black and white,
+    /// thicker), and each line is the version the readings agree on most. In IP and MAC
+    /// addresses and numbers, look-alike letters are put right (O to 0, l to 1).
+    static class Reader
+    {
+        // Measured on screenshots of addresses: Windows OCR reads best when a line's box is about
+        // this many pixels tall (12 px text enlarged 2 to 2.5 times); much larger reads worse.
+        const float Target = 24;
+        const int Pad = 24;        // a white margin: text touching the edge is often missed
+        enum Prep { None, Bw }
+
+        internal static List<OcrPass> Read(Bitmap img, bool harder, Func<Bitmap, string> ocr, int maxDim)
+        {
+            var passes = new List<OcrPass>();
+            var done = new List<KeyValuePair<string, float>>();
+            float side = Math.Max(img.Width, img.Height), limit = (maxDim > 0 ? maxDim : 4096) - 2 * Pad;
+            using (var grey = Grey(img))
+            {
+                // Each way once: the same preparation at nearly the same size reads the same.
+                Action<string, Bitmap, float, Prep> pass = (name, src, k, prep) =>
+                {
+                    k = Math.Max(0.25f, Math.Min(k, limit / side));
+                    if (done.Exists(d => d.Key == name && Math.Abs(d.Value - k) < 0.2f)) return;
+                    done.Add(new KeyValuePair<string, float>(name, k));
+                    passes.Add(Pass(ocr, name, src, k, prep));
+                };
+                pass("grey", grey, 2, Prep.None);
+                float h = LineHeight(passes[0]);
+                float s = h > 0 ? Math.Max(1.5f, Math.Min(4, Target / h)) : 2;
+                pass("grey", grey, s, Prep.None);
+                pass("original colours", img, s, Prep.None);
+                pass("black and white", grey, s, Prep.Bw);
+                pass("grey", grey, s * 1.25f, Prep.None);
+                pass("grey", grey, s * 0.8f, Prep.None);
+                if (harder)
+                {
+                    pass("original colours", img, s * 0.8f, Prep.None);
+                    pass("original colours", img, s * 1.25f, Prep.None);
+                    pass("black and white", grey, s * 0.8f, Prep.Bw);
+                    pass("grey", grey, 1.5f, Prep.None);
+                    pass("grey", grey, 3, Prep.None);
+                    pass("original colours", img, 2, Prep.None);
+                }
+            }
+            return passes;
+        }
+
+        static OcrPass Pass(Func<Bitmap, string> ocr, string name, Bitmap src, float s, Prep prep)
+        {
+            int w = Math.Max(1, (int)Math.Round(src.Width * s)), h = Math.Max(1, (int)Math.Round(src.Height * s));
+            using (var b = new Bitmap(w + 2 * Pad, h + 2 * Pad, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(b))
+                using (var ia = new ImageAttributes())
+                {
+                    g.Clear(Color.White);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    ia.SetWrapMode(WrapMode.TileFlipXY);
+                    g.DrawImage(src, new Rectangle(Pad, Pad, w, h), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+                }
+                if (prep == Prep.Bw) BlackAndWhite(b);
+                return new OcrPass { Name = name + ", " + s.ToString("0.#", CultureInfo.InvariantCulture) + "\u00d7", Lines = Parse(ocr(b) ?? "", s, Pad) };
+            }
+        }
+
+        static byte[] Pixels(Bitmap b)
+        {
+            var d = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            var px = new byte[d.Stride * b.Height];
+            Marshal.Copy(d.Scan0, px, 0, px.Length);
+            b.UnlockBits(d);
+            return px;
+        }
+
+        static void SetPixels(Bitmap b, byte[] px)
+        {
+            var d = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            Marshal.Copy(px, 0, d.Scan0, px.Length);
+            b.UnlockBits(d);
+        }
+
+        static int Percentile(int[] hist, int n, float q)
+        {
+            int at = (int)(n * q), sum = 0;
+            for (int i = 0; i < 256; i++) { sum += hist[i]; if (sum > at) return i; }
+            return 255;
+        }
+
+        /// Grey, dark text on a light background, at full contrast.
+        internal static Bitmap Grey(Bitmap img)
+        {
+            int w = img.Width, h = img.Height, n = w * h;
+            var b = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(b)) g.DrawImage(img, new Rectangle(0, 0, w, h), 0, 0, w, h, GraphicsUnit.Pixel);
+            var px = Pixels(b);
+            var hist = new int[256];
+            for (int i = 0; i < px.Length; i += 4)
+            {
+                int l = (px[i + 2] * 299 + px[i + 1] * 587 + px[i] * 114) / 1000;
+                px[i] = (byte)l;
+                hist[l]++;
+            }
+            // Mostly dark means light text on a dark background: turn it around.
+            bool invert = Percentile(hist, n, 0.5f) < 128;
+            int lo = Percentile(hist, n, 0.01f), hi = Percentile(hist, n, 0.99f);
+            if (hi - lo < 40) { lo = 0; hi = 255; }
+            for (int i = 0; i < px.Length; i += 4)
+            {
+                int v = Ui.Clamp((px[i] - lo) * 255 / (hi - lo), 0, 255);
+                if (invert) v = 255 - v;
+                px[i] = px[i + 1] = px[i + 2] = (byte)v;
+                px[i + 3] = 255;
+            }
+            SetPixels(b, px);
+            return b;
+        }
+
+        /// Otsu's threshold: the grey level that best splits text from background.
+        internal static int Otsu(int[] hist, int n)
+        {
+            double sum = 0, sumB = 0, best = -1;
+            for (int i = 0; i < 256; i++) sum += i * (double)hist[i];
+            int wB = 0, t = 128;
+            for (int i = 0; i < 256; i++)
+            {
+                wB += hist[i];
+                if (wB == 0) continue;
+                int wF = n - wB;
+                if (wF == 0) break;
+                sumB += i * (double)hist[i];
+                double mB = sumB / wB, mF = (sum - sumB) / wF, between = (double)wB * wF * (mB - mF) * (mB - mF);
+                if (between > best) { best = between; t = i; }
+            }
+            return t;
+        }
+
+        static void BlackAndWhite(Bitmap b)
+        {
+            var px = Pixels(b);
+            var hist = new int[256];
+            for (int i = 0; i < px.Length; i += 4) hist[px[i]]++;
+            int t = Otsu(hist, px.Length / 4);
+            for (int i = 0; i < px.Length; i += 4) px[i] = px[i + 1] = px[i + 2] = (byte)(px[i] <= t ? 0 : 255);
+            SetPixels(b, px);
+        }
+
+        static float LineHeight(OcrPass p)
+        {
+            if (p.Lines.Count == 0) return 0;
+            var hs = new List<float>();
+            foreach (var l in p.Lines) hs.Add(l.Box.Height);
+            hs.Sort();
+            return hs[hs.Count / 2];
+        }
+
+        /// Shot.ps1 hands over one word per row: line number, x, y, width, height, text,
+        /// in the enlarged picture's pixels.
+        internal static List<OcrLine> Parse(string raw, float s, int pad)
+        {
+            var rows = new List<List<KeyValuePair<RectangleF, string>>>();
+            string at = null;
+            foreach (var row in raw.Split('\n'))
+            {
+                var f = row.TrimEnd('\r').Split(new[] { '\t' }, 6);
+                if (f.Length < 6 || f[5].Length == 0) continue;
+                if (f[0] != at) rows.Add(new List<KeyValuePair<RectangleF, string>>());
+                at = f[0];
+                Func<int, float> num = i => float.Parse(f[i], CultureInfo.InvariantCulture);
+                rows[rows.Count - 1].Add(new KeyValuePair<RectangleF, string>(new RectangleF((num(1) - pad) / s, (num(2) - pad) / s, num(3) / s, num(4) / s), f[5]));
+            }
+            // OCR breaks a line at a wide gap ("Listening on 0." | "0.0.0:8080"); a gap
+            // narrower than the letters are tall is still the same line.
+            for (bool merged = true; merged; )
+            {
+                merged = false;
+                for (int i = 0; i < rows.Count && !merged; i++)
+                    for (int j = 0; j < rows.Count && !merged; j++)
+                    {
+                        if (i == j) continue;
+                        RectangleF a = Box(rows[i]), b = Box(rows[j]);
+                        float v = Math.Min(a.Bottom, b.Bottom) - Math.Max(a.Top, b.Top), h = Math.Max(a.Height, b.Height), gap = b.Left - a.Right;
+                        if (v < 0.6f * Math.Min(a.Height, b.Height) || gap < -0.2f * h || gap > h) continue;
+                        rows[i].AddRange(rows[j]);
+                        rows.RemoveAt(j);
+                        merged = true;
+                    }
+            }
+            return rows.ConvertAll<OcrLine>(Line);
+        }
+
+        static RectangleF Box(List<KeyValuePair<RectangleF, string>> words)
+        {
+            var box = words[0].Key;
+            foreach (var w in words) box = RectangleF.Union(box, w.Key);
+            return box;
+        }
+
+        static OcrLine Line(List<KeyValuePair<RectangleF, string>> words)
+        {
+            float h = 0;
+            foreach (var w in words) h = Math.Max(h, w.Key.Height);
+            var box = words[0].Key;
+            var sb = new StringBuilder(words[0].Value);
+            string word = words[0].Value;
+            for (int i = 1; i < words.Count; i++)
+            {
+                var a = words[i - 1];
+                var b = words[i];
+                float gap = b.Key.Left - a.Key.Right;
+                if (gap < 0.1f * h || gap < 0.6f * h && Glue(word, b.Value)) word += b.Value;
+                else { sb.Append(' '); word = b.Value; }
+                sb.Append(b.Value);
+                box = RectangleF.Union(box, b.Key);
+            }
+            return new OcrLine(box, sb.ToString());
+        }
+
+        const string Seps = ".:-";
+
+        /// "192.168." + "1.10", "00:1" + "a:2b:3c:4d:5e": an address that OCR split in two.
+        internal static bool Glue(string a, string b)
+        {
+            if (Address(Trim(a + b)) != null) return true;
+            if (Seps.IndexOf(a[a.Length - 1]) < 0 && Seps.IndexOf(b[0]) < 0) return false;
+            return Part(a) && Part(b);
+        }
+
+        static string Trim(string t) { return t.Trim("([{<\"'".ToCharArray()).TrimEnd(",;)]}>\"'.".ToCharArray()); }
+
+        // Hex digits and separators only, with a digit in it or one group of two (a MAC's "AA").
+        static bool Part(string s)
+        {
+            bool digit = false;
+            foreach (char c in s)
+            {
+                if (c >= '0' && c <= '9') digit = true;
+                else if (Seps.IndexOf(c) < 0 && !Uri.IsHexDigit(c) && HexFrom.IndexOf(c) < 0) return false;
+            }
+            return digit || s.Trim(Seps.ToCharArray()).Length == 2;
+        }
+
+        static readonly Regex IPv4 = new Regex(@"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(/\d{1,2})?(:\d{1,5})?$"),
+            Mac = new Regex(@"^[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(\1[0-9A-Fa-f]{2}){4}$"),
+            MacDots = new Regex(@"^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$"),
+            IPv6 = new Regex(@"^((?=.*::)[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}|[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){7})(/\d{1,3})?$");
+
+        // What OCR mistakes for a digit (\u00f8 and e: the slashed zero of Consolas and other code fonts).
+        // Plain numbers only take the safest ones.
+        const string DigitFrom = "OoQDe\u00f8\u00d8\u03b8lIi|!SsBZzgqGbT", DigitTo = "00000000111115582299667";
+        const string HexFrom = "OoQ\u00f8\u00d8\u03b8lIi|!SsZzGT", HexTo = "00000011111552267";
+        const string PlainFrom = "Oo\u00f8\u00d8lI|", PlainTo = "0000111";
+
+        static string Map(string s, string from, string to, string keep)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+            {
+                int k;
+                if (c >= '0' && c <= '9' || keep.IndexOf(c) >= 0) sb.Append(c);
+                else if ((k = from.IndexOf(c)) >= 0) sb.Append(to[k]);
+                else return null;
+            }
+            return sb.ToString();
+        }
+
+        static int Count(string s, Func<char, bool> f) { int n = 0; foreach (char c in s) if (f(c)) n++; return n; }
+
+        internal static string Fix(string line)
+        {
+            var parts = line.Split(' ');
+            for (int i = 0; i < parts.Length; i++) parts[i] = FixWord(parts[i]);
+            return string.Join(" ", parts);
+        }
+
+        /// One word, with any brackets, quotes and trailing punctuation left as they are.
+        internal static string FixWord(string t)
+        {
+            int a = 0, b = t.Length;
+            while (a < b && "([{<\"'".IndexOf(t[a]) >= 0) a++;
+            while (b > a && ",;)]}>\"'.".IndexOf(t[b - 1]) >= 0) b--;
+            string core = t.Substring(a, b - a), done = FixCore(core);
+            return done == null ? t : t.Substring(0, a) + done + t.Substring(b);
+        }
+
+        static string FixCore(string c)
+        {
+            string a = Address(c);
+            if (a != null) return a;
+            // A plain number, date or time (1O24, 2O26-1O-28), or the numbers in SN-2O26-1O28, bytes=3Z.
+            var n = Plain(c);
+            if (n != null) return n;
+            var parts = Regex.Split(c, "([-=:/_])");
+            bool any = false;
+            for (int i = 0; i < parts.Length; i += 2)
+            {
+                var p = Plain(parts[i]);
+                if (p != null) { parts[i] = p; any = true; }
+            }
+            return any ? string.Concat(parts) : null;
+        }
+
+        static string Plain(string c)
+        {
+            int digits = Count(c, ch => ch >= '0' && ch <= '9'), swaps = Count(c, ch => PlainFrom.IndexOf(ch) >= 0);
+            return c.Length >= 3 && digits >= 2 && digits > swaps ? Map(c, PlainFrom, PlainTo, ".,:-/") : null;
+        }
+
+        /// An IP or MAC address with its look-alike letters put right, or null.
+        static string Address(string c)
+        {
+            int digits = Count(c, ch => ch >= '0' && ch <= '9');
+            if (c.Length < 3) return null;
+
+            // IPv4, also with a comma read for a dot, a /prefix or a :port. "O.O.O.O" is 0.0.0.0,
+            // but "S.S.S.S" could be 5s or 8s, so it needs some digits or zeros to go on.
+            if (Count(c, ch => ch == '.' || ch == ',') == 3 && Count(c, ch => ch >= '0' && ch <= '9' || "Oo\u00f8\u00d8\u03b8".IndexOf(ch) >= 0) >= 2)
+            {
+                var ip = Map(c.Replace(',', '.'), DigitFrom, DigitTo, ".:/");
+                if (ip != null && IsIPv4(ip)) return ip;
+            }
+            // MAC: six pairs; a ; . , or a dot in the middle of the line read for a separator.
+            const string MacSeps = ":-.;,\u2022\u00b7";
+            if (c.Length == 17 && Count(c, ch => MacSeps.IndexOf(ch) >= 0) == 5)
+            {
+                char sep = c.IndexOf('-') >= 0 && c.IndexOf(':') < 0 ? '-' : ':';
+                var sb = new StringBuilder(c);
+                for (int i = 0; i < sb.Length; i++) if (MacSeps.IndexOf(sb[i]) >= 0) sb[i] = sep;
+                var m = Map(sb.ToString(), HexFrom, HexTo, "abcdefABCDEF:-");
+                if (m != null && Mac.IsMatch(m)) return SameCase(m);
+            }
+            // MAC with a separator lost ("00:1a:2b:3c4d:5e"): twelve hex digits, four or five separators of one kind.
+            foreach (char sep in ":-")
+            {
+                if (Count(c, ch => ch == sep) < 4 || Count(c, ch => ch == sep) > 5) continue;
+                var m = Map(c.Replace(sep.ToString(), ""), HexFrom, HexTo, "abcdefABCDEF");
+                if (m == null || m.Length != 12) continue;
+                var sb = new StringBuilder();
+                for (int i = 0; i < 12; i += 2) sb.Append(i > 0 ? sep.ToString() : "").Append(m, i, 2);
+                return SameCase(sb.ToString());
+            }
+            if (c.Length == 14 && Count(c, ch => ch == '.') == 2)
+            {
+                var m = Map(c, HexFrom, HexTo, "abcdefABCDEF.");
+                if (m != null && MacDots.IsMatch(m)) return SameCase(m);
+            }
+            if (digits == 0) return null;
+            // IPv6.
+            if (Count(c, ch => ch == ':') >= 2)
+            {
+                var m = Map(c.Replace('\u2022', ':').Replace('\u00b7', ':'), HexFrom, HexTo, "abcdefABCDEF:/");
+                if (m != null && IPv6.IsMatch(m) && m.IndexOf("::") == m.LastIndexOf("::")) return m;
+            }
+            return null;
+        }
+
+        static bool IsIPv4(string s)
+        {
+            var m = IPv4.Match(s);
+            if (!m.Success) return false;
+            for (int i = 1; i <= 4; i++) if (int.Parse(m.Groups[i].Value, CultureInfo.InvariantCulture) > 255) return false;
+            return true;
+        }
+
+        // A MAC address is all capitals or all small letters.
+        static string SameCase(string m)
+        {
+            return Count(m, char.IsUpper) >= Count(m, char.IsLower) ? m.ToUpperInvariant() : m.ToLowerInvariant();
+        }
+
+        /// Lines in reading order; lines side by side (columns, tables) share a row, tab apart.
+        internal static string Layout(List<OcrLine> lines)
+        {
+            var ls = new List<OcrLine>(lines);
+            ls.Sort((a, b) => a.Box.Top.CompareTo(b.Box.Top));
+            var used = new bool[ls.Count];
+            var sb = new StringBuilder();
+            for (int i = 0; i < ls.Count; i++)
+            {
+                if (used[i]) continue;
+                float mid = ls[i].Box.Top + ls[i].Box.Height / 2;
+                var row = new List<OcrLine>();
+                for (int j = i; j < ls.Count; j++)
+                    if (!used[j] && ls[j].Box.Top <= mid && ls[j].Box.Bottom >= mid) { used[j] = true; row.Add(ls[j]); }
+                row.Sort((a, b) => a.Box.Left.CompareTo(b.Box.Left));
+                if (sb.Length > 0) sb.Append("\r\n");
+                for (int k = 0; k < row.Count; k++) sb.Append(k > 0 ? "\t" : "").Append(row[k].Text);
+            }
+            return sb.ToString();
+        }
+
+        internal static string PassText(OcrPass p, bool fix)
+        {
+            var ls = new List<OcrLine>();
+            foreach (var l in p.Lines) ls.Add(new OcrLine(l.Box, fix ? Fix(l.Text) : l.Text));
+            return Layout(ls);
+        }
+
+        static bool Same(RectangleF a, RectangleF b)
+        {
+            float v = Math.Min(a.Bottom, b.Bottom) - Math.Max(a.Top, b.Top);
+            return v >= 0.5f * Math.Min(a.Height, b.Height) && Math.Min(a.Right, b.Right) > Math.Max(a.Left, b.Left);
+        }
+
+        /// Line by line, the text the readings agree on most. `agree`: how many readings
+        /// had exactly that line, in percent.
+        internal static string Vote(List<OcrPass> passes, bool fix, out int agree)
+        {
+            // Group the lines that sit in the same place; a line that spans two groups joins them.
+            var groups = new List<List<KeyValuePair<int, OcrLine>>>();
+            for (int p = 0; p < passes.Count; p++)
+                foreach (var l in passes[p].Lines)
+                {
+                    var home = new List<KeyValuePair<int, OcrLine>> { new KeyValuePair<int, OcrLine>(p, l) };
+                    foreach (var g in groups.FindAll(g => g.Exists(m => Same(m.Value.Box, l.Box)))) { home.AddRange(g); groups.Remove(g); }
+                    groups.Add(home);
+                }
+            var chosen = new List<OcrLine>();
+            int matched = 0, total = 0;
+            foreach (var g in groups)
+            {
+                // One version per reading (a reading may have split the line in two), best readings first.
+                var byPass = new SortedDictionary<int, List<OcrLine>>();
+                var box = g[0].Value.Box;
+                foreach (var m in g)
+                {
+                    if (!byPass.ContainsKey(m.Key)) byPass[m.Key] = new List<OcrLine>();
+                    byPass[m.Key].Add(m.Value);
+                    box = RectangleF.Union(box, m.Value.Box);
+                }
+                // Seen by just one of several readings: a speck, not text.
+                if (byPass.Count == 1 && passes.Count >= 3) continue;
+                var cands = new List<string>();
+                foreach (var ls in byPass.Values)
+                {
+                    ls.Sort((a, b) => a.Box.Left.CompareTo(b.Box.Left));
+                    var t = string.Join(" ", ls.ConvertAll(l => l.Text).ToArray());
+                    cands.Add(fix ? Fix(t) : t);
+                }
+                // The version closest to all the others, then word by word what most of them say.
+                // Windows OCR leaves out words it is unsure of rather than misreading them, so a
+                // version with a valid address in it counts as if some more readings agreed.
+                int best = 0;
+                double top = -1;
+                for (int i = 0; i < cands.Count; i++)
+                {
+                    double score = 0.25 * (cands.Count - 1) * Array.FindAll(cands[i].Split(' '), x => Address(Trim(x)) != null).Length;
+                    for (int j = 0; j < cands.Count; j++) if (j != i) score += Similar(cands[i], cands[j]);
+                    if (score > top + 1e-9) { top = score; best = i; }
+                }
+                string line = Words(cands, best);
+                matched += cands.FindAll(c => c == line).Count;
+                total += passes.Count;
+                chosen.Add(new OcrLine(box, line));
+            }
+            agree = total == 0 ? 0 : matched * 100 / total;
+            return Layout(chosen);
+        }
+
+        /// Each word of cands[main], replaced by the spelling most versions have in its place.
+        static string Words(List<string> cands, int main)
+        {
+            var w = cands[main].Split(' ');
+            var votes = new List<Dictionary<string, int>>();
+            foreach (var x in w) votes.Add(new Dictionary<string, int> { { x, 1 } });
+            for (int c = 0; c < cands.Count; c++)
+            {
+                if (c == main) continue;
+                var o = cands[c].Split(' ');
+                foreach (var pair in Align(w, o))
+                {
+                    var v = votes[pair.Key];
+                    int n;
+                    v.TryGetValue(o[pair.Value], out n);
+                    v[o[pair.Value]] = n + 1;
+                }
+            }
+            // A valid address beats a broken one when the votes are close.
+            Func<string, double> weight = x => Address(Trim(x)) != null ? 0.5 : 0;
+            for (int i = 0; i < w.Length; i++)
+                foreach (var kv in votes[i])
+                    if (kv.Value + weight(kv.Key) > votes[i][w[i]] + weight(w[i])) w[i] = kv.Key;
+            return string.Join(" ", w);
+        }
+
+        /// Pairs of words (index in a, index in b) that line up, by edit distance over words.
+        static List<KeyValuePair<int, int>> Align(string[] a, string[] b)
+        {
+            int n = a.Length, m = b.Length;
+            var d = new double[n + 1, m + 1];
+            for (int i = 0; i <= n; i++) d[i, 0] = i;
+            for (int j = 0; j <= m; j++) d[0, j] = j;
+            for (int i = 1; i <= n; i++)
+                for (int j = 1; j <= m; j++)
+                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + 1 - Similar(a[i - 1], b[j - 1]));
+            var pairs = new List<KeyValuePair<int, int>>();
+            for (int i = n, j = m; i > 0 && j > 0; )
+            {
+                if (Math.Abs(d[i, j] - (d[i - 1, j - 1] + 1 - Similar(a[i - 1], b[j - 1]))) < 1e-9)
+                {
+                    // Only words that look alike count as the same word read differently.
+                    if (Similar(a[i - 1], b[j - 1]) >= 0.5) pairs.Add(new KeyValuePair<int, int>(i - 1, j - 1));
+                    i--; j--;
+                }
+                else if (Math.Abs(d[i, j] - (d[i - 1, j] + 1)) < 1e-9) i--;
+                else j--;
+            }
+            return pairs;
+        }
+
+        /// 1 for the same text, down to 0: one minus the edit distance over the length.
+        internal static double Similar(string a, string b)
+        {
+            if (a == b) return 1;
+            int n = a.Length, m = b.Length;
+            var d = new int[m + 1];
+            for (int j = 0; j <= m; j++) d[j] = j;
+            for (int i = 1; i <= n; i++)
+            {
+                int diag = d[0];
+                d[0] = i;
+                for (int j = 1; j <= m; j++)
+                {
+                    int up = d[j];
+                    d[j] = Math.Min(Math.Min(d[j] + 1, d[j - 1] + 1), diag + (a[i - 1] == b[j - 1] ? 0 : 1));
+                    diag = up;
+                }
+            }
+            return 1 - (double)d[m] / Math.Max(n, m);
+        }
+    }
+
+    /// What OCR read, before anything is copied: fix it by hand, flip through the other
+    /// readings, read harder, or take the screenshot again.
+    class OcrPreview : Form
+    {
+        static readonly Color BG = Ui.Hex(0x111113), CARD = Ui.Hex(0x1C1C1F), TEXT = Ui.Hex(0xF2F2F7),
+            MUTED = Ui.Hex(0x8E8E96), CONTROL = Ui.Hex(0x2C2C30), CONTROL_HOVER = Ui.Hex(0x3A3A40), ACCENT = Ui.Hex(0xE0182D);
+        readonly Bitmap img;
+        readonly float sc;
+        readonly PictureBox pic;
+        readonly TextBox box;
+        readonly Label info;
+        readonly CheckBox fixBox;
+        readonly Button prev, next, harder, copy;
+        List<OcrPass> passes = new List<OcrPass>();
+        string best = "", bestRaw = "";
+        int agree, agreeRaw, shown;
+        bool readHarder;
+
+        int S(float v) { return (int)Math.Round(v * sc); }
+
+        public OcrPreview(Bitmap image)
+        {
+            img = image;
+            sc = Native.ScaleAt(Cursor.Position);
+            var mon = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Text = "Shot: copy text";
+            Icon = App.AppIcon;
+            AutoScaleMode = AutoScaleMode.None;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = BG;
+            ForeColor = TEXT;
+            Font = Ui.Font(14 * sc);
+            KeyPreview = true;
+            var size = new Size(Math.Min(S(820), mon.Width), Math.Min(S(600), mon.Height));
+            Bounds = new Rectangle(mon.X + (mon.Width - size.Width) / 2, mon.Y + (mon.Height - size.Height) / 2, size.Width, size.Height);
+            MinimumSize = new Size(S(560), S(380));
+
+            pic = new PictureBox { Dock = DockStyle.Top, Image = img, SizeMode = PictureBoxSizeMode.Zoom, BackColor = CARD };
+            pic.Height = Ui.Clamp(img.Height + S(20), S(48), S(200));
+            info = new Label { Dock = DockStyle.Top, Height = S(34), ForeColor = MUTED, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(S(14), 0, 0, 0), Text = "Reading\u2026" };
+            box = new TextBox
+            {
+                Dock = DockStyle.Fill, Multiline = true, AcceptsReturn = false, WordWrap = false, ScrollBars = ScrollBars.Both,
+                BorderStyle = BorderStyle.None, BackColor = CARD, ForeColor = TEXT, Font = new Font("Consolas", 16 * sc, GraphicsUnit.Pixel), ReadOnly = true
+            };
+            var textArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(S(14), S(10), S(14), S(10)), BackColor = CARD };
+            textArea.Controls.Add(box);
+
+            var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = S(58), FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Padding = new Padding(S(10), S(10), S(10), 0) };
+            copy = Btn("Copy", true, Copy);
+            var retake = Btn("Retake", false, Retake);
+            harder = Btn("Read harder", false, () => Run(true));
+            next = Btn("\u25b6", false, () => ShowReading(shown + 1));
+            prev = Btn("\u25c0", false, () => ShowReading(shown - 1));
+            fixBox = new CheckBox { Text = "Fix IPs, MACs, numbers", Checked = true, AutoSize = true, ForeColor = TEXT, Margin = new Padding(S(4), S(8), S(16), 0) };
+            fixBox.CheckedChanged += (s, e) => ShowReading(shown);
+            bar.Controls.AddRange(new Control[] { copy, retake, harder, next, prev, fixBox });
+            var tips = new ToolTip();
+            tips.SetToolTip(prev, "Previous reading");
+            tips.SetToolTip(next, "Next reading: what each way of reading saw");
+            tips.SetToolTip(harder, "Read again more ways (slower)");
+            tips.SetToolTip(retake, "Take the screenshot again");
+            tips.SetToolTip(copy, "Copy the text (Enter)");
+            AcceptButton = copy;
+
+            // Docked last is laid out first.
+            Controls.Add(textArea);
+            Controls.Add(bar);
+            Controls.Add(info);
+            Controls.Add(pic);
+            foreach (Control c in bar.Controls) c.Enabled = false;
+        }
+
+        Button Btn(string text, bool accent, Action click)
+        {
+            var b = new Button { Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat, BackColor = accent ? ACCENT : CONTROL, ForeColor = TEXT, Height = S(36), Padding = new Padding(S(8), 0, S(8), 0), Margin = new Padding(S(4), 0, S(4), 0), Cursor = Cursors.Hand };
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = accent ? Ui.Hex(0xF0283D) : CONTROL_HOVER;
+            b.Click += (s, e) => click();
+            return b;
+        }
+
+        protected override void OnHandleCreated(EventArgs e) { Native.Dark(Handle, false); base.OnHandleCreated(e); }
+        protected override void OnShown(EventArgs e) { base.OnShown(e); BeginInvoke((Action)(() => Run(false))); }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape) { e.Handled = true; Close(); }
+            base.OnKeyDown(e);
+        }
+
+        void Run(bool more)
+        {
+            foreach (Control c in copy.Parent.Controls) c.Enabled = false;
+            box.ReadOnly = true;
+            info.Text = more ? "Reading harder\u2026" : "Reading\u2026";
+            Cursor = Cursors.WaitCursor;
+            Update();
+            try
+            {
+                passes = Reader.Read(img, more, App.Ocr, App.OcrMax);
+                best = Reader.Vote(passes, true, out agree);
+                bestRaw = Reader.Vote(passes, false, out agreeRaw);
+                readHarder |= more;
+            }
+            catch (Exception ex) { passes = new List<OcrPass>(); best = bestRaw = ""; info.Text = "Text recognition failed: " + ex.GetBaseException().Message; }
+            Cursor = Cursors.Default;
+            foreach (Control c in copy.Parent.Controls) c.Enabled = true;
+            box.ReadOnly = false;
+            if (passes.Count > 0) ShowReading(0);
+            box.Focus();
+        }
+
+        /// 0: the best reading; 1..n: what each way of reading saw.
+        void ShowReading(int k)
+        {
+            if (passes.Count == 0) return;
+            shown = Ui.Clamp(k, 0, passes.Count);
+            bool fix = fixBox.Checked;
+            string top = fix ? best : bestRaw, t = shown == 0 ? top : Reader.PassText(passes[shown - 1], fix);
+            box.Text = t;
+            box.Select(0, 0);
+            if (t.Trim().Length == 0) info.Text = "No text found. Try Read harder, or Retake with a larger area.";
+            else if (shown == 0) info.Text = "Best of " + passes.Count + " readings  \u00b7  " + (fix ? agree : agreeRaw) + "% agree  \u00b7  edit anything, then Copy";
+            else info.Text = "Reading " + shown + " of " + passes.Count + ": " + passes[shown - 1].Name + (t == top ? "  \u00b7  same as the best" : "");
+            prev.Enabled = shown > 0;
+            next.Enabled = shown < passes.Count;
+            harder.Enabled = !readHarder;
+            copy.Enabled = t.Trim().Length > 0;
+        }
+
+        void Copy()
+        {
+            string t = box.Text.TrimEnd();
+            if (t.Length == 0) return;
+            try
+            {
+                Clipboard.SetText(t);
+                int lines = t.Split('\n').Length;
+                App.ShowToast("Copied text (" + lines + " line" + (lines == 1 ? ")" : "s)"), 2);
+                Close();
+            }
+            catch (Exception e) { App.ShowToast("Copy failed: " + e.Message, 4); }
+        }
+
+        void Retake()
+        {
+            Close();
+            App.CaptureSoon();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            pic.Image = null;
+            img.Dispose();
+            base.OnFormClosed(e);
+        }
+    }
+
     // ----- the app: tray, shortcut, captures, outputs ---------------------------------------------
 
     public static class App
     {
-        public const string Version = "2.1.0";
+        public const string Version = "2.2.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
-        /// Copies the text out of a picture. Set by Shot.ps1 when Windows OCR is there.
+        /// Reads a picture with Windows OCR, one word per row (see Reader.Parse). Set by
+        /// Shot.ps1 when Windows OCR is there, with the largest picture it takes.
         public static Func<Bitmap, string> Ocr;
+        public static int OcrMax;
 
         internal static Config Cfg = new Config();
         internal static Icon AppIcon;
@@ -2436,33 +3148,19 @@ namespace Shot
         internal static void ReadText(Bitmap img)
         {
             if (Ocr == null) { img.Dispose(); ShowToast("Text recognition is not available on this system", 4); return; }
-            ShowToast("Reading text\u2026", 30);
-            // Let the toast paint before the (blocking) recognition runs.
-            host.BeginInvoke((Action)(() =>
-            {
-                string text;
-                try
-                {
-                    // Small captures read far better when enlarged first.
-                    int k = img.Height < 300 && img.Width < 3000 ? 2 : 1;
-                    using (var big = new Bitmap(img.Width * k, img.Height * k))
-                    {
-                        using (var g = Graphics.FromImage(big))
-                        {
-                            g.Clear(Color.White);
-                            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                            g.DrawImage(img, 0, 0, big.Width, big.Height);
-                        }
-                        text = (Ocr(big) ?? "").TrimEnd();
-                    }
-                }
-                catch (Exception e) { ShowToast("Text recognition failed: " + e.GetBaseException().Message, 5); return; }
-                finally { img.Dispose(); }
-                if (text.Trim().Length == 0) { ShowToast("No text found", 2); return; }
-                int lines = text.Split('\n').Length;
-                try { Clipboard.SetText(text); ShowToast("Copied text (" + lines + " line" + (lines == 1 ? ")" : "s)"), 2); }
-                catch (Exception e) { ShowToast("Copy failed: " + e.Message, 4); }
-            }));
+            var p = new OcrPreview(img);
+            p.Show();
+            p.TopMost = true;
+            p.TopMost = false;
+            p.Activate();
+        }
+
+        /// A new capture once the window that asked for it has gone from the screen.
+        internal static void CaptureSoon()
+        {
+            var t = new System.Windows.Forms.Timer { Interval = 150 };
+            t.Tick += (s, e) => { t.Dispose(); StartCapture(); };
+            t.Start();
         }
 
         internal static void OpenFolder()
@@ -2636,6 +3334,21 @@ namespace Shot
             key(0xA2, true, 3000); key(0xA2, false, 3050); t.Spoil(); key(0xA2, true, 3100);
             check(!key(0xA2, false, 3150), "a click in between spoils it");
 
+            check(Reader.FixWord("192.168.l.1O") == "192.168.1.10" && Reader.FixWord("(l92,168,0,1),") == "(192.168.0.1),", "IPv4 look-alikes");
+            check(Reader.FixWord("10.0.0.1/24") == "10.0.0.1/24" && Reader.FixWord("10.O.0.1:8O8O") == "10.0.0.1:8080", "IPv4 prefix and port");
+            check(Reader.FixWord("300.1.1.1") == "300.1.1.1" && Reader.FixWord("v1.2.3") == "v1.2.3", "not an IP stays");
+            check(Reader.FixWord("0O-1A-2B-3C-4D-5E") == "00-1A-2B-3C-4D-5E" && Reader.FixWord("aa:bb;cc:dd:ee:fO") == "aa:bb:cc:dd:ee:f0", "MAC look-alikes");
+            check(Reader.FixWord("00:1a:2b:3c4d:5e") == "00:1a:2b:3c:4d:5e" && Reader.FixWord("3C-52-82-1F-AO-B7") == "3C-52-82-1F-A0-B7" && Reader.FixWord("2026-10-28") == "2026-10-28", "MAC with a separator lost");
+            check(Reader.FixWord("fe8O::1") == "fe80::1" && Reader.FixWord("1O24") == "1024" && Reader.FixWord("2O26-1O-28") == "2026-10-28", "IPv6 and numbers");
+            check(Reader.Fix("Hello SOS B12 IPv4 x64 Win11 S.S.S.S") == "Hello SOS B12 IPv4 x64 Win11 S.S.S.S", "words stay as they are");
+            check(Reader.Fix("on O.O.O.O:8O8O SN-2O26-1O28 l\u00f8.\u00f8.\u00f8.l") == "on 0.0.0.0:8080 SN-2026-1028 10.0.0.1", "zeros, serials, slashed zeros");
+            check(Reader.Layout(Reader.Parse("0\t10\t10\t20\t20\te.\n0\t36\t10\t90\t20\t\u00f8.\u00f8.\u00f8:8080\n", 1, 0)) == "e.\u00f8.\u00f8.\u00f8:8080" && Reader.Fix("e.\u00f8.\u00f8.\u00f8:8080") == "0.0.0.0:8080", "an address split at a dot");
+            check(Reader.Layout(Reader.Parse("0\t10\t10\t70\t20\t192.168.\n0\t84\t10\t30\t20\t1.10\n1\t10\t40\t30\t20\tIP:\n1\t46\t40\t60\t20\t10.0.0.1\n", 1, 0)) == "192.168.1.10\r\nIP: 10.0.0.1", "split addresses glued, words spaced");
+            Func<string, OcrPass> one = s => new OcrPass { Name = s, Lines = new List<OcrLine> { new OcrLine(new RectangleF(0, 0, 100, 20), s) } };
+            int ag;
+            check(Reader.Vote(new List<OcrPass> { one("10.0.0.7"), one("10.0.0.l"), one("10.0.0.7") }, false, out ag) == "10.0.0.7" && ag == 66, "readings vote");
+            check(Reader.Vote(new List<OcrPass> { one("10.0.0.l"), one("10.0.0.1"), one("1O.0.0.1") }, true, out ag) == "10.0.0.1" && ag == 100, "fixes before the vote");
+
             using (var logo = Ui.Logo(64))
                 check(logo.GetPixel(32, 32).ToArgb() == Color.Black.ToArgb() && logo.GetPixel(0, 0).A == 0, "logo draws");
             return fails.Count == 0 ? "ok" : "FAILED: " + string.Join("; ", fails.ToArray());
@@ -2668,7 +3381,17 @@ try {
             $decoder = Wait-WinRT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
             $bitmap = Wait-WinRT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
             $result = Wait-WinRT ($script:ocrEngine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-            return (($result.Lines | ForEach-Object { $_.Text }) -join "`r`n")
+            # One word per row: line number, box, text. Shot puts the words together itself.
+            $sb = New-Object System.Text.StringBuilder
+            $i = 0
+            foreach ($line in $result.Lines) {
+                foreach ($w in $line.Words) {
+                    $r = $w.BoundingRect
+                    [void]$sb.Append("$i`t$([int]$r.X)`t$([int]$r.Y)`t$([int]$r.Width)`t$([int]$r.Height)`t$($w.Text)`n")
+                }
+                $i++
+            }
+            return $sb.ToString()
         } finally { $ms.Dispose() }
     }
     try {
@@ -2681,6 +3404,7 @@ try {
         $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
         if ($script:ocrEngine -and $script:asTask) {
             [Shot.App]::Ocr = [Func[System.Drawing.Bitmap, string]] { param($bmp) Read-Text $bmp }
+            [Shot.App]::OcrMax = [Windows.Media.Ocr.OcrEngine]::MaxImageDimension
         }
     } catch { }
 

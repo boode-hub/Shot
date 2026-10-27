@@ -26,7 +26,7 @@
 | ⚡ **Instant** | Press **Shift + Space** and the screen freezes under your cursor. Drag, or click a window to take just that window. |
 | ✏️ **Mark it up** | Pen, highlighter, line, arrow, box, ellipse, text, blur and numbered steps, in 8 quick colours or **any colour** from the full colour panel. |
 | 📌 **Pin anything** | Keep a screenshot floating above every window while you read from it, type from it or compare. |
-| 🔤 **Copy the text** | Turn a screenshot into text with the OCR engine built into Windows. |
+| 🔤 **Copy the text** | Turn a screenshot into text with the OCR engine built into Windows, read several ways and voted on, with IP and MAC addresses put right. You see it before it is copied. |
 | 🔦 **Spotlight** | Double-tap **Ctrl**: the screen dims and a circle of light follows your cursor. Made for demos and screen shares. |
 | 🔒 **Private** | Blur what others should not see. Shot never connects to the internet. |
 
@@ -58,6 +58,25 @@ follows it across every screen. Clicks pass straight through, so you keep workin
 Double-tap **Ctrl** again or press **Esc** to turn it off. Ctrl shortcuts (Ctrl + C, Ctrl + click) never
 trigger it, and it gets out of the way when you take a screenshot.
 
+## Copy the text
+
+<p align="center">
+  <img src="docs/ocr.png" width="720" alt="The text preview: the screenshot on top, what Shot read below it, and buttons to flip through readings, read harder, retake or copy">
+</p>
+
+Select an area and press **Ctrl + T** (on a pin too). Shot shows what it read before anything is copied:
+
+- **Edit** the text if something is off, then **Copy** (or **Enter**). **Esc** closes it.
+- **◀ ▶** flip through what each way of reading saw, if one of them got a line better.
+- **Read harder** reads it more ways (slower). **Retake** takes the screenshot again.
+- **Fix IPs, MACs, numbers** is on by default. Untick it to see exactly what Windows read.
+
+How it reads: the screenshot goes to Windows OCR several times, enlarged to the size it reads best, in
+grey, in black and white and in its own colours, with light-on-dark screens turned around. Each line is
+the version the readings agree on most, word by word. Then look-alike letters in addresses and numbers
+are put right: `l92.168.l.1O` → `192.168.1.10`, `0O:1a:2b:3c4d:5e` → `00:1a:2b:3c:4d:5e`, Consolas's
+slashed `ø` → `0`, and an address split by a stray space is joined again. Words stay as they are.
+
 ## Shortcuts
 
 **Capture**: drag to select, **click** a window to take just that window, **Ctrl + A** for the whole
@@ -81,7 +100,7 @@ hold **Shift** for straight lines, squares and circles · **Ctrl + Z / Ctrl + Y*
 | Copy | **Ctrl + C**, **Enter**, or double-click |
 | Save | **Ctrl + S** (quick save to the folder: **Ctrl + Shift + S**) |
 | Pin to the screen | **Ctrl + P** or **F3** |
-| Copy the text (OCR) | **Ctrl + T** |
+| Copy the text (OCR), with a preview | **Ctrl + T** |
 | Cancel | **Esc** or right-click |
 
 **Pins** stay on top: drag to move, **wheel** to zoom, **0** for actual size, **Ctrl + C / S / T** to copy,
