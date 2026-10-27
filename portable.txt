@@ -1,5 +1,0 @@
-Shot portable mode.
-
-Because this file sits next to Shot.exe, Shot keeps its settings in the "data"
-folder here instead of in your user profile, and installs nothing.
-Delete this file to make Shot use your user profile instead.
