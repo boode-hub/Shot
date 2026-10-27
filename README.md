@@ -22,7 +22,7 @@
 
 | | |
 |---|---|
-| 📦 **Portable** | Two files you can read: `Shot.ps1` and `Shot.vbs`. No installer, no `.exe`, no admin rights. Settings stay in a `data` folder beside them, so it runs from anywhere, even a USB stick. |
+| 📦 **Portable** | Files you can read: `Shot.ps1`, `Shot.vbs` to start it and `Remove Shot.vbs` to remove it. No installer, no `.exe`, no admin rights. Settings stay in a `data` folder beside them, so it runs from anywhere, even a USB stick. |
 | ⚡ **Instant** | Press **Shift + Space** and the screen freezes under your cursor. Drag, or click a window to take just that window. |
 | ✏️ **Mark it up** | Pen, highlighter, line, arrow, box, ellipse, text, blur and numbered steps, in 8 quick colours or **any colour** from the full colour panel. |
 | 📌 **Pin anything** | Keep a screenshot floating above every window while you read from it, type from it or compare. |
@@ -41,7 +41,15 @@ Turn on **Start Shot when I log in** in Settings to keep it running: it adds thi
 your start-up apps (the per-user Run key, no admin needed). Turn it off to remove it. If you move the
 folder, turn it off and on again.
 
-To update, extract the new release over the old folder (your `data` folder stays), or run `git pull`.
+To update, quit Shot from its tray icon and extract the new release over the old folder (your `data` folder
+stays), or run `git pull`.
+
+**To remove Shot**, double-click `Remove Shot.vbs`. It asks first, then:
+
+- **Yes**: stops Shot, takes it out of start-up, and moves the folder (with your settings) to the Recycle Bin.
+- **No**: stops Shot and takes it out of start-up, but keeps the files. `Shot.vbs` starts it again.
+
+Screenshots you saved elsewhere, such as `Pictures\Shot`, are never touched.
 
 > [!TIP]
 > If Windows blocks a downloaded copy, right-click the ZIP **before** extracting, choose **Properties**,
@@ -73,7 +81,9 @@ Select an area and press **Ctrl + T** (on a pin too). Shot shows what it read be
 
 How it reads: the screenshot goes to Windows OCR several times, enlarged to the size it reads best, in
 grey, in black and white and in its own colours, with light-on-dark screens turned around. Each line is
-the version the readings agree on most, word by word. Then look-alike letters in addresses and numbers
+the version the readings agree on most, word by word. A `|` that OCR read as `l` or `I`, or left out,
+is found in the picture itself: a thin stroke standing alone that reaches below the line the letters sit
+on, which `l`, `I` and `1` never do. Then look-alike letters in addresses and numbers
 are put right: `l92.168.l.1O` → `192.168.1.10`, `0O:1a:2b:3c4d:5e` → `00:1a:2b:3c:4d:5e`, Consolas's
 slashed `ø` → `0`, and an address split by a stray space is joined again. Words stay as they are.
 
@@ -130,9 +140,11 @@ Windows OCR engine. `Shot.vbs` only starts it without a console window. Start-up
 
 ```
 Shot.vbs                              double-click to run (no console window)
+Remove Shot.vbs                       double-click to remove (asks first)
 powershell -File Shot.ps1 -Capture    run and capture right away
 powershell -File Shot.ps1 -Settings   run and open Settings
 powershell -File Shot.ps1 -Test       self-check: prints ok or what failed
+powershell -File Shot.ps1 -Remove     what Remove Shot.vbs runs
 ```
 
 ## Support

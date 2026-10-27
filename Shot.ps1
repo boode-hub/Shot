@@ -10,11 +10,55 @@
     Shot.ps1 -Capture    run in the tray and capture right away
     Shot.ps1 -Settings   run in the tray and open Settings
     Shot.ps1 -Test       self-check, prints "ok" or what failed
+    Shot.ps1 -Remove     stop Shot, take it out of start-up, and (if you say so) move
+                         this folder to the Recycle Bin; Remove Shot.vbs runs this
 #>
-param([switch]$Capture, [switch]$Settings, [switch]$Test)
+param([switch]$Capture, [switch]$Settings, [switch]$Test, [switch]$Remove)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+
+if ($Remove) {
+    $dir = $PSScriptRoot
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        "Remove Shot?`n`nYes: stop Shot, take it out of start-up, and move this folder (with your settings) to the Recycle Bin:`n$dir`n`nNo: only stop Shot and take it out of start-up. The files stay, and Shot.vbs starts it again.`n`nScreenshots you saved elsewhere are not touched.",
+        'Remove Shot', 'YesNoCancel', 'Question', 'Button3')
+    if ($answer -eq 'Cancel') { exit }
+
+    # Ask a running Shot to quit, and wait for it to let go of its one-Shot lock.
+    try { [void][System.Threading.EventWaitHandle]::OpenExisting('Local\Shot.Quit').Set() } catch { }
+    for ($i = 0; $i -lt 50; $i++) {
+        $m = $null
+        if (-not [System.Threading.Mutex]::TryOpenExisting('Local\Shot.Screenshot', [ref]$m)) { break }
+        $m.Dispose()
+        Start-Sleep -Milliseconds 100
+    }
+    # An older Shot without the quit signal: stop the one running from this folder.
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object {
+        $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf("$dir\Shot.ps1", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+    # Start-up: only the entry that starts this copy.
+    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $entry = (Get-ItemProperty $run -Name Shot -ErrorAction SilentlyContinue).Shot
+    if ($entry -and $entry.IndexOf("$dir\Shot.vbs", [StringComparison]::OrdinalIgnoreCase) -ge 0) { Remove-ItemProperty $run -Name Shot }
+
+    $done = 'Shot is stopped and no longer starts when you log in.'
+    if ($answer -eq 'Yes') {
+        # Out of the folder first: a folder a program is working in cannot be moved.
+        Set-Location $env:TEMP
+        [Environment]::CurrentDirectory = $env:TEMP
+        try {
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($dir, 'OnlyErrorDialogs', 'SendToRecycleBin')
+            $done = "Shot is removed. Its folder is in the Recycle Bin, if you want it back."
+        } catch {
+            $done += "`n`nThe folder could not be moved to the Recycle Bin ($($_.Exception.Message)). Close anything using it and delete it by hand:`n$dir"
+        }
+    }
+    [void][System.Windows.Forms.MessageBox]::Show($done, 'Remove Shot', 'OK', 'Information')
+    exit
+}
 
 # One Shot per user. A second launch asks the running one to show Settings.
 if (-not $Test) {
@@ -2096,13 +2140,14 @@ namespace Shot
             float side = Math.Max(img.Width, img.Height), limit = (maxDim > 0 ? maxDim : 4096) - 2 * Pad;
             using (var grey = Grey(img))
             {
+                var ink = new Ink(grey);
                 // Each way once: the same preparation at nearly the same size reads the same.
                 Action<string, Bitmap, float, Prep> pass = (name, src, k, prep) =>
                 {
                     k = Math.Max(0.25f, Math.Min(k, limit / side));
                     if (done.Exists(d => d.Key == name && Math.Abs(d.Value - k) < 0.2f)) return;
                     done.Add(new KeyValuePair<string, float>(name, k));
-                    passes.Add(Pass(ocr, name, src, k, prep));
+                    passes.Add(Pass(ocr, name, src, k, prep, ink));
                 };
                 pass("grey", grey, 2, Prep.None);
                 float h = LineHeight(passes[0]);
@@ -2125,7 +2170,7 @@ namespace Shot
             return passes;
         }
 
-        static OcrPass Pass(Func<Bitmap, string> ocr, string name, Bitmap src, float s, Prep prep)
+        static OcrPass Pass(Func<Bitmap, string> ocr, string name, Bitmap src, float s, Prep prep, Ink ink)
         {
             int w = Math.Max(1, (int)Math.Round(src.Width * s)), h = Math.Max(1, (int)Math.Round(src.Height * s));
             using (var b = new Bitmap(w + 2 * Pad, h + 2 * Pad, PixelFormat.Format32bppArgb))
@@ -2140,7 +2185,7 @@ namespace Shot
                     g.DrawImage(src, new Rectangle(Pad, Pad, w, h), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia);
                 }
                 if (prep == Prep.Bw) BlackAndWhite(b);
-                return new OcrPass { Name = name + ", " + s.ToString("0.#", CultureInfo.InvariantCulture) + "\u00d7", Lines = Parse(ocr(b) ?? "", s, Pad) };
+                return new OcrPass { Name = name + ", " + s.ToString("0.#", CultureInfo.InvariantCulture) + "\u00d7", Lines = Parse(ocr(b) ?? "", s, Pad, ink) };
             }
         }
 
@@ -2236,7 +2281,7 @@ namespace Shot
 
         /// Shot.ps1 hands over one word per row: line number, x, y, width, height, text,
         /// in the enlarged picture's pixels.
-        internal static List<OcrLine> Parse(string raw, float s, int pad)
+        internal static List<OcrLine> Parse(string raw, float s, int pad, Ink ink)
         {
             var rows = new List<List<KeyValuePair<RectangleF, string>>>();
             string at = null;
@@ -2266,7 +2311,113 @@ namespace Shot
                         merged = true;
                     }
             }
+            if (ink != null) foreach (var r in rows) Pipes(ink, r);
             return rows.ConvertAll<OcrLine>(Line);
+        }
+
+        /// How dark each pixel of the grey picture is, for finding the | that OCR gets wrong.
+        internal class Ink
+        {
+            public readonly int W, H;
+            readonly byte[] d;
+            public Ink(Bitmap grey)
+            {
+                W = grey.Width;
+                H = grey.Height;
+                var px = Pixels(grey);
+                d = new byte[W * H];
+                for (int i = 0; i < d.Length; i++) d[i] = (byte)(255 - px[i * 4]);
+            }
+            // Fairly low: a thin stroke between two pixel columns is only half dark in each.
+            public bool At(int x, int y) { return x >= 0 && y >= 0 && x < W && y < H && d[y * W + x] > 100; }
+        }
+
+        /// Windows OCR reads | as l or I, or leaves it out. A | is a thin straight stroke that
+        /// stands alone, reaches up to the top of the letters and goes below the line they sit
+        /// on, which l, I and 1 never do. Each one found is put right in `words`, or added.
+        static void Pipes(Ink ink, List<KeyValuePair<RectangleF, string>> words)
+        {
+            var box = Box(words);
+            float lh = box.Height;
+            int x0 = Math.Max(0, (int)(box.Left - lh)), x1 = Math.Min(ink.W - 1, (int)(box.Right + lh));
+            int y0 = Math.Max(0, (int)(box.Top - 0.5f * lh)), y1 = Math.Min(ink.H - 1, (int)(box.Bottom + 0.5f * lh));
+            int n = x1 - x0 + 1;
+            if (n < 3 || y1 - y0 < 6) return;
+
+            // Each column's longest run of ink.
+            var top = new int[n];
+            var bot = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                top[i] = -1;
+                for (int y = y0, run = 0, best = 0; y <= y1; y++)
+                {
+                    if (!ink.At(x0 + i, y)) { run = 0; continue; }
+                    if (++run > best) { best = run; top[i] = y - run + 1; bot[i] = y; }
+                }
+            }
+            // The band of small letters (or digits) holds the most ink per row: from its top (mid)
+            // down to the line the letters sit on (baseLine).
+            int r0 = Math.Max(0, (int)box.Top), r1 = Math.Min(ink.H - 1, (int)Math.Ceiling(box.Bottom));
+            if (r1 - r0 < 4) return;
+            var rows = new int[r1 - r0 + 1];
+            int peak = 0;
+            for (int y = r0; y <= r1; y++)
+            {
+                for (int x = x0; x <= x1; x++) if (ink.At(x, y)) rows[y - r0]++;
+                if (rows[y - r0] > rows[peak]) peak = y - r0;
+            }
+            int lim = Math.Max(1, rows[peak] * 2 / 5), lo = peak, hi = peak;
+            while (lo > 0 && rows[lo - 1] >= lim) lo--;
+            while (hi < rows.Length - 1 && rows[hi + 1] >= lim) hi++;
+            int mid = r0 + lo, baseLine = r0 + hi, body = baseLine - mid;
+            if (body < 4) return;
+            int side = Math.Max(1, (int)Math.Round(0.25 * body)), maxW = Math.Max(2, (int)Math.Round(0.25 * body));
+
+            Func<int, bool> tall = i => top[i] >= 0 && top[i] > y0 && bot[i] < y1
+                && top[i] <= mid + 0.15 * body && bot[i] >= baseLine + Math.Max(1, 0.12 * body);
+            for (int i = 0; i < n; i++)
+            {
+                if (!tall(i)) continue;
+                int j = i;
+                while (j + 1 < n && tall(j + 1)) j++;
+                int gL = i, gR = j;
+                i = j;
+                if (gR - gL + 1 > maxW) continue;
+                int ts = int.MaxValue, bs = 0;
+                for (int k = gL; k <= gR; k++) { ts = Math.Min(ts, top[k]); bs = Math.Max(bs, bot[k]); }
+                // Alone: nothing beside it from the top of the small letters down (a p or q has its
+                // bowl there), and no arms at its ends (a [ or ]).
+                // (Its own soft edge, one pixel either side, is not a neighbour.)
+                bool alone = true;
+                for (int y = ts; y <= bs && alone; y++)
+                    for (int k = 2; k <= side + 1 && alone; k++)
+                        if (ink.At(x0 + gL - k, y) || ink.At(x0 + gR + k, y)) alone = false;
+                if (!alone) continue;
+
+                float cx = x0 + (gL + gR) / 2f + 0.5f;
+                int w = words.FindIndex(p => cx >= p.Key.Left - 0.1f * lh && cx <= p.Key.Right + 0.1f * lh);
+                if (w < 0)
+                {
+                    // OCR left it out.
+                    int at = words.FindIndex(p => p.Key.Left > cx);
+                    words.Insert(at < 0 ? words.Count : at, new KeyValuePair<RectangleF, string>(new RectangleF(cx - 1, ts, 2, bs - ts + 1), "|"));
+                    continue;
+                }
+                // The l, I or 1 nearest to where the stroke is in the word.
+                var word = words[w];
+                string t = word.Value;
+                float pos = (cx - word.Key.Left) / Math.Max(1, word.Key.Width) * t.Length - 0.5f;
+                int pick = -1;
+                for (int c = 0; c < t.Length; c++)
+                    if ("lI1|!i".IndexOf(t[c]) >= 0 && Math.Abs(c - pos) <= 1.5f && (pick < 0 || Math.Abs(c - pos) < Math.Abs(pick - pos))) pick = c;
+                if (pick < 0) continue;
+                // It stands alone, so OCR's "MACI" was "MAC |" (but "II" stays together as "||").
+                string before = t.Substring(0, pick), after = t.Substring(pick + 1);
+                if (before.Length > 0 && "lI1|!i".IndexOf(before[before.Length - 1]) < 0) before += " ";
+                if (after.Length > 0 && "lI1|!i".IndexOf(after[0]) < 0) after = " " + after;
+                words[w] = new KeyValuePair<RectangleF, string>(word.Key, before + "|" + after);
+            }
         }
 
         static RectangleF Box(List<KeyValuePair<RectangleF, string>> words)
@@ -2288,7 +2439,9 @@ namespace Shot
                 var a = words[i - 1];
                 var b = words[i];
                 float gap = b.Key.Left - a.Key.Right;
-                if (gap < 0.1f * h || gap < 0.6f * h && Glue(word, b.Value)) word += b.Value;
+                // (|| in a code font: two strokes a letter apart; "| |" is three letters apart.)
+                bool pipes = word.EndsWith("|") && b.Value.StartsWith("|") && gap < 0.8f * h;
+                if (gap < 0.1f * h || pipes || gap < 0.6f * h && Glue(word, b.Value)) word += b.Value;
                 else { sb.Append(' '); word = b.Value; }
                 sb.Append(b.Value);
                 box = RectangleF.Union(box, b.Key);
@@ -2301,12 +2454,13 @@ namespace Shot
         /// "192.168." + "1.10", "00:1" + "a:2b:3c:4d:5e": an address that OCR split in two.
         internal static bool Glue(string a, string b)
         {
+            if (a.EndsWith("|") || b.StartsWith("|")) return false;
             if (Address(Trim(a + b)) != null) return true;
             if (Seps.IndexOf(a[a.Length - 1]) < 0 && Seps.IndexOf(b[0]) < 0) return false;
             return Part(a) && Part(b);
         }
 
-        static string Trim(string t) { return t.Trim("([{<\"'".ToCharArray()).TrimEnd(",;)]}>\"'.".ToCharArray()); }
+        static string Trim(string t) { return t.Trim("([{<|\"'".ToCharArray()).TrimEnd(",;)]}>|\"'.".ToCharArray()); }
 
         // Hex digits and separators only, with a digit in it or one group of two (a MAC's "AA").
         static bool Part(string s)
@@ -2327,9 +2481,9 @@ namespace Shot
 
         // What OCR mistakes for a digit (\u00f8 and e: the slashed zero of Consolas and other code fonts).
         // Plain numbers only take the safest ones.
-        const string DigitFrom = "OoQDe\u00f8\u00d8\u03b8lIi|!SsBZzgqGbT", DigitTo = "00000000111115582299667";
-        const string HexFrom = "OoQ\u00f8\u00d8\u03b8lIi|!SsZzGT", HexTo = "00000011111552267";
-        const string PlainFrom = "Oo\u00f8\u00d8lI|", PlainTo = "0000111";
+        const string DigitFrom = "OoQDe\u00f8\u00d8\u03b8lIi!SsBZzgqGbT", DigitTo = "0000000011115582299667";
+        const string HexFrom = "OoQ\u00f8\u00d8\u03b8lIi!SsZzGT", HexTo = "0000001111552267";
+        const string PlainFrom = "Oo\u00f8\u00d8lI", PlainTo = "000011";
 
         static string Map(string s, string from, string to, string keep)
         {
@@ -2357,8 +2511,8 @@ namespace Shot
         internal static string FixWord(string t)
         {
             int a = 0, b = t.Length;
-            while (a < b && "([{<\"'".IndexOf(t[a]) >= 0) a++;
-            while (b > a && ",;)]}>\"'.".IndexOf(t[b - 1]) >= 0) b--;
+            while (a < b && "([{<|\"'".IndexOf(t[a]) >= 0) a++;
+            while (b > a && ",;)]}>|\"'.".IndexOf(t[b - 1]) >= 0) b--;
             string core = t.Substring(a, b - a), done = FixCore(core);
             return done == null ? t : t.Substring(0, a) + done + t.Substring(b);
         }
@@ -2773,7 +2927,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.2.0";
+        public const string Version = "2.3.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -2818,6 +2972,11 @@ namespace Shot
             var listener = new Thread(() => { while (ev.WaitOne()) host.BeginInvoke((Action)OpenSettings); });
             listener.IsBackground = true;
             listener.Start();
+            // Remove Shot.vbs asks it to quit.
+            var quit = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\Shot.Quit");
+            var quitter = new Thread(() => { if (quit.WaitOne()) host.BeginInvoke((Action)Quit); });
+            quitter.IsBackground = true;
+            quitter.Start();
 
             string wanted = Cfg.Hotkey;
             HotkeyError = Register(wanted);
@@ -3342,8 +3501,21 @@ namespace Shot
             check(Reader.FixWord("fe8O::1") == "fe80::1" && Reader.FixWord("1O24") == "1024" && Reader.FixWord("2O26-1O-28") == "2026-10-28", "IPv6 and numbers");
             check(Reader.Fix("Hello SOS B12 IPv4 x64 Win11 S.S.S.S") == "Hello SOS B12 IPv4 x64 Win11 S.S.S.S", "words stay as they are");
             check(Reader.Fix("on O.O.O.O:8O8O SN-2O26-1O28 l\u00f8.\u00f8.\u00f8.l") == "on 0.0.0.0:8080 SN-2026-1028 10.0.0.1", "zeros, serials, slashed zeros");
-            check(Reader.Layout(Reader.Parse("0\t10\t10\t20\t20\te.\n0\t36\t10\t90\t20\t\u00f8.\u00f8.\u00f8:8080\n", 1, 0)) == "e.\u00f8.\u00f8.\u00f8:8080" && Reader.Fix("e.\u00f8.\u00f8.\u00f8:8080") == "0.0.0.0:8080", "an address split at a dot");
-            check(Reader.Layout(Reader.Parse("0\t10\t10\t70\t20\t192.168.\n0\t84\t10\t30\t20\t1.10\n1\t10\t40\t30\t20\tIP:\n1\t46\t40\t60\t20\t10.0.0.1\n", 1, 0)) == "192.168.1.10\r\nIP: 10.0.0.1", "split addresses glued, words spaced");
+            check(Reader.Layout(Reader.Parse("0\t10\t10\t20\t20\te.\n0\t36\t10\t90\t20\t\u00f8.\u00f8.\u00f8:8080\n", 1, 0, null)) == "e.\u00f8.\u00f8.\u00f8:8080" && Reader.Fix("e.\u00f8.\u00f8.\u00f8:8080") == "0.0.0.0:8080", "an address split at a dot");
+            check(Reader.Layout(Reader.Parse("0\t10\t10\t70\t20\t192.168.\n0\t84\t10\t30\t20\t1.10\n1\t10\t40\t30\t20\tIP:\n1\t46\t40\t60\t20\t10.0.0.1\n", 1, 0, null)) == "192.168.1.10\r\nIP: 10.0.0.1", "split addresses glued, words spaced");
+            // A | that OCR read as l, next to an l that is an l.
+            using (var bmp = new Bitmap(260, 40))
+            using (var font = new Font("Segoe UI", 20, GraphicsUnit.Pixel))
+            {
+                using (var g = Graphics.FromImage(bmp)) { g.Clear(Color.White); TextRenderer.DrawText(g, "grep | wc -l", font, new Point(4, 6), Color.Black, Color.White, TextFormatFlags.NoPadding); }
+                // The word boxes Windows OCR gives for this picture.
+                const string raw = "0\t4\t18\t40\t16\tgrep\n0\t51\t13\t3\t21\tl\n0\t59\t18\t24\t11\twc\n0\t89\t13\t11\t16\t-l\n";
+                using (var grey = Reader.Grey(bmp))
+                {
+                    string got = Reader.Layout(Reader.Parse(raw, 1, 0, new Reader.Ink(grey)));
+                    check(got == "grep | wc -l", "a | read as l is found: " + got);
+                }
+            }
             Func<string, OcrPass> one = s => new OcrPass { Name = s, Lines = new List<OcrLine> { new OcrLine(new RectangleF(0, 0, 100, 20), s) } };
             int ag;
             check(Reader.Vote(new List<OcrPass> { one("10.0.0.7"), one("10.0.0.l"), one("10.0.0.7") }, false, out ag) == "10.0.0.7" && ag == 66, "readings vote");
