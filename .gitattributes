@@ -1,3 +1,4 @@
 # Windows scripts keep Windows line endings on every checkout.
 *.ps1 text eol=crlf
 *.vbs text eol=crlf
+*.cs text eol=crlf

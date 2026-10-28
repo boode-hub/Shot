@@ -22,7 +22,7 @@
 
 | | |
 |---|---|
-| 📦 **Portable** | Files you can read: `Shot.ps1`, `Shot.vbs` to start it and `Remove Shot.vbs` to remove it. No installer, no `.exe`, no admin rights. Settings stay in a `data` folder beside them, so it runs from anywhere, even a USB stick. |
+| 📦 **Portable** | Plain text files you can read: the app in `Shot.cs`, `Shot.vbs` to start it and `Remove Shot.vbs` to remove it. No installer, no `.exe`, no admin rights. Settings stay in a `data` folder beside them, so it runs from anywhere, even a USB stick. |
 | ⚡ **Instant** | Press **Shift + Space** and the screen freezes under your cursor. Drag, or click a window to take just that window. |
 | ✏️ **Mark it up** | Pen, highlighter, line, arrow, box, ellipse, text, blur and numbered steps, in 8 quick colours or **any colour** from the full colour panel. |
 | 📌 **Pin anything** | Keep a screenshot floating above every window while you read from it, type from it or compare. |
@@ -137,17 +137,25 @@ other apps. If that gets in the way, pick something else, for example Print Scre
 
 ## How it works
 
-`Shot.ps1` holds the whole app. Each time it starts, Windows PowerShell 5.1 compiles the C# inside it in
-memory (with the .NET Framework that ships with Windows) and runs it: WinForms windows, GDI+ drawing, the
-Windows OCR engine. `Shot.vbs` only starts it without a console window. Start-up takes about two seconds.
+The app is the C# in `Shot.cs`: WinForms windows, GDI+ drawing, the Windows OCR engine. `Shot.ps1` compiles it
+with the .NET Framework that ships with Windows the first time it starts, and keeps the result in `data\`
+(named after a fingerprint of `Shot.cs`, so an update compiles again by itself). After that, Shot is ready
+about a second after you double-click `Shot.vbs`, which only starts `Shot.ps1` without a console window.
+Delete `data\Shot-*.dll` whenever you like; it is made again.
+
+| File | What it is |
+|---|---|
+| `Shot.vbs` | Double-click to start Shot |
+| `Remove Shot.vbs` | Double-click to remove Shot (asks first; runs `Remove.ps1`) |
+| `Shot.cs` | The app |
+| `Shot.ps1` | Starts the app, and connects it to Windows OCR |
+| `data\` | Your settings, made on first start |
 
 ```
 Shot.vbs                              double-click to run (no console window)
-Remove Shot.vbs                       double-click to remove (asks first)
 powershell -File Shot.ps1 -Capture    run and capture right away
 powershell -File Shot.ps1 -Settings   run and open Settings
 powershell -File Shot.ps1 -Test       self-check: prints ok or what failed
-powershell -File Shot.ps1 -Remove     what Remove Shot.vbs runs
 ```
 
 ## Support
