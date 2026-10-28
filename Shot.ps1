@@ -423,7 +423,8 @@ namespace Shot
     class Config
     {
         public string Hotkey = Shortcut.Default;
-        public string SaveDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Shot");
+        public string SaveDir = DefaultSaveDir;
+        internal static string DefaultSaveDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Shot"); } }
         /// Save button shows a dialog (true) or saves straight into SaveDir.
         public bool AskWhere = true;
         public bool CopyOnSave;
@@ -449,7 +450,7 @@ namespace Shot
                 switch (k)
                 {
                     case "hotkey": if (v.Length > 0) c.Hotkey = v; break;
-                    case "save_dir": if (v.Length > 0) c.SaveDir = v; break;
+                    case "save_dir": if (v.Length > 0) c.SaveDir = Local(v); break;
                     case "save_mode": c.AskWhere = !v.Equals("folder", StringComparison.OrdinalIgnoreCase); break;
                     case "copy_on_save": c.CopyOnSave = v == "true" || v == "yes" || v == "1"; break;
                     case "color": if (Ui.TryHex(v, out col)) c.Color = col; break;
@@ -469,12 +470,42 @@ namespace Shot
         {
             return "# Shot settings, managed by Shot's Settings window (tray icon -> Settings).\r\nversion = 2\r\n\r\n" +
                 "# Capture shortcut, e.g. Shift+Space, PrintScreen, Ctrl+Alt+KeyS\r\nhotkey = " + Hotkey + "\r\n\r\n" +
-                "# Where screenshots are saved.\r\nsave_dir = " + SaveDir + "\r\n" +
+                "# Where screenshots are saved. <Pictures> and %USERPROFILE% are whoever uses this copy.\r\nsave_dir = " + Portable(SaveDir) + "\r\n" +
                 "# ask = show a Save dialog; folder = save straight into save_dir\r\nsave_mode = " + (AskWhere ? "ask" : "folder") + "\r\n" +
                 "# Also copy the image to the clipboard when saving (true/false)\r\ncopy_on_save = " + (CopyOnSave ? "true" : "false") + "\r\n\r\n" +
                 "# Last used drawing style (updated automatically).\r\ncolor = " + Ui.ToHex(Color) + "\r\nhighlighter = " + Ui.ToHex(Marker) +
                 "\r\nsize = " + Size + "\r\ncustom_colors = " + string.Join(",", Array.ConvertAll(CustomColors,
                     v => Ui.ToHex(Color.FromArgb(v & 255, (v >> 8) & 255, (v >> 16) & 255)))) + "\r\n";
+        }
+
+        // The folder is written for whoever uses this copy, so a copy passed to a friend saves
+        // into their Pictures: <Pictures>\Shot, %USERPROFILE%\..., or a path outside any profile.
+        static string Profile { get { return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile); } }
+
+        static bool Under(string path, string dir)
+        {
+            return dir.Length > 0 && (path.Equals(dir, StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith(dir.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase));
+        }
+
+        internal static string Portable(string dir)
+        {
+            string pics = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+            if (Under(dir, pics)) return "<Pictures>" + dir.Substring(pics.TrimEnd('\\').Length);
+            if (Under(dir, Profile)) return "%USERPROFILE%" + dir.Substring(Profile.TrimEnd('\\').Length);
+            return dir;
+        }
+
+        internal static string Local(string v)
+        {
+            if (v.StartsWith("<Pictures>", StringComparison.OrdinalIgnoreCase))
+                v = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures).TrimEnd('\\') + v.Substring("<Pictures>".Length);
+            v = Environment.ExpandEnvironmentVariables(v);
+            // Written on someone else's PC, inside their profile (C:\Users\them\...): that is not
+            // this person's folder, so use their own Pictures instead. C:\Users\Public is shared.
+            string users = Path.GetDirectoryName(Profile.TrimEnd('\\')) ?? "";
+            if (Under(v, users) && !Under(v, Profile) && !Under(v, Path.Combine(users, "Public"))) return DefaultSaveDir;
+            return v;
         }
 
         public static Config Load(string path, out bool first)
@@ -1599,6 +1630,8 @@ namespace Shot
         float zoom = 1;
         int lastClick;
         Point lastAt;
+        bool hovering, minimized;
+        int hot = -1;   // the corner button under the mouse: 0 minimize, 1 close
 
         public Pin(Bitmap img, Point at)
         {
@@ -1618,6 +1651,7 @@ namespace Shot
             Item(m, "Save\u2026", "Ctrl+S", () => App.SaveImage(Img, App.Cfg.AskWhere));
             Item(m, "Copy text (OCR)", "Ctrl+T", () => App.ReadText(new Bitmap(Img)));
             Item(m, "Actual size", "0", () => SetZoom(1));
+            Item(m, "Minimize", "M", Minimize);
             m.Items.Add(new ToolStripSeparator());
             Item(m, "Close", "Esc", Close);
             Item(m, "Close all pins", "", App.CloseAllPins);
@@ -1633,14 +1667,101 @@ namespace Shot
 
         void ZoomBy(float steps) { SetZoom(zoom * (float)Math.Pow(1.1, steps)); }
 
+        // Keep the window between about 40 px and 4x the image.
+        float MinZoom { get { return Math.Min(1f, 40f / Math.Min(Img.Width, Img.Height)); } }
+
         void SetZoom(float z)
         {
-            // Keep the window between about 40 px and 4x the image.
-            float min = Math.Min(1f, 40f / Math.Min(Img.Width, Img.Height));
-            zoom = Math.Max(min, Math.Min(4f, z));
+            zoom = Math.Max(MinZoom, Math.Min(4f, z));
             ClientSize = new Size(Math.Max(1, (int)Math.Round(Img.Width * zoom)), Math.Max(1, (int)Math.Round(Img.Height * zoom)));
             Invalidate();
         }
+
+        // ----- resize by the edges, minimize to the taskbar ----------------------------------
+
+        float Sc { get { return Native.ScaleAt(new Point(Left + Width / 2, Top + Height / 2)); } }
+
+        protected override CreateParams CreateParams
+        {
+            // A minimize box and system menu: the taskbar button can then minimize and restore it.
+            get { var cp = base.CreateParams; cp.Style |= 0x20000 | 0x80000; return cp; }
+        }
+
+        internal void Minimize()
+        {
+            // Pins have no taskbar button until they are minimized, so they can be found again there.
+            // (Adding the button rebuilds the window, so only count as minimized after that.)
+            ShowInTaskbar = true;
+            WindowState = FormWindowState.Minimized;
+            minimized = true;
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            if (WindowState == FormWindowState.Minimized) return;
+            if (minimized)
+            {
+                minimized = false;
+                BeginInvoke((Action)(() => { ShowInTaskbar = false; TopMost = true; Activate(); }));
+            }
+            zoom = (float)ClientSize.Width / Img.Width;
+            Invalidate();
+        }
+
+        // The outer few pixels are edges and corners to resize with: 1 left, 2 right, 4 top, 8 bottom.
+        int EdgeAt(Point p)
+        {
+            int e = Math.Max(5, (int)(7 * Sc)), s = 0;
+            if (p.X < e) s |= 1; else if (p.X >= ClientSize.Width - e) s |= 2;
+            if (p.Y < e) s |= 4; else if (p.Y >= ClientSize.Height - e) s |= 8;
+            return s;
+        }
+
+        static Cursor CursorFor(int s)
+        {
+            if (s == 5 || s == 10) return Cursors.SizeNWSE;
+            if (s == 6 || s == 9) return Cursors.SizeNESW;
+            if ((s & 3) != 0) return Cursors.SizeWE;
+            return (s & 12) != 0 ? Cursors.SizeNS : Cursors.Default;
+        }
+
+        int sizing;
+        Rectangle sizeFrom;
+        Point sizeAt;
+
+        /// Follow the mouse while an edge is dragged; the picture keeps its shape, and the
+        /// opposite edge stays put.
+        void SizeTo(Point mouse)
+        {
+            int dx = mouse.X - sizeAt.X, dy = mouse.Y - sizeAt.Y;
+            float w = sizeFrom.Width + ((sizing & 1) != 0 ? -dx : (sizing & 2) != 0 ? dx : 0);
+            float h = sizeFrom.Height + ((sizing & 4) != 0 ? -dy : (sizing & 8) != 0 ? dy : 0);
+            // The edge that moved the most decides; a top or bottom edge alone goes by height.
+            bool byHeight = (sizing & 3) == 0 || (sizing & 12) != 0 && Math.Abs(h / sizeFrom.Height - 1) > Math.Abs(w / sizeFrom.Width - 1);
+            float z = Math.Max(MinZoom, Math.Min(4f, byHeight ? h / Img.Height : w / Img.Width));
+            int nw = Math.Max(1, (int)Math.Round(Img.Width * z)), nh = Math.Max(1, (int)Math.Round(Img.Height * z));
+            Bounds = new Rectangle((sizing & 1) != 0 ? sizeFrom.Right - nw : sizeFrom.X, (sizing & 4) != 0 ? sizeFrom.Bottom - nh : sizeFrom.Y, nw, nh);
+        }
+
+        // The minimize and close buttons in the top right corner, shown while the mouse is over the pin.
+        Rectangle Button(int i)
+        {
+            int s = (int)(22 * Sc), gap = (int)(6 * Sc);
+            return new Rectangle(ClientSize.Width - gap - (2 - i) * s - (1 - i) * gap, gap, s, s);
+        }
+        bool ButtonsFit { get { return ClientSize.Width >= Button(0).Width * 4 && ClientSize.Height >= Button(0).Height * 2; } }
+        int ButtonAt(Point p) { if (!ButtonsFit) return -1; for (int i = 0; i < 2; i++) if (Button(i).Contains(p)) return i; return -1; }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (sizing != 0) { SizeTo(Cursor.Position); return; }
+            int h = ButtonAt(e.Location);
+            Cursor = h >= 0 ? Cursors.Hand : CursorFor(EdgeAt(e.Location));
+            if (!hovering || h != hot) { hovering = true; hot = h; Invalidate(); }
+            base.OnMouseMove(e);
+        }
+        protected override void OnMouseLeave(EventArgs e) { hovering = false; hot = -1; Invalidate(); base.OnMouseLeave(e); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -1651,6 +1772,20 @@ namespace Shot
             g.PixelOffsetMode = PixelOffsetMode.Default;
             // A thin border tells the pin apart from what is underneath.
             using (var pen = new Pen(ContainsFocus ? Ui.Accent : Color.Gray)) g.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+            if (!hovering || !ButtonsFit) return;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float k = Sc;
+            for (int i = 0; i < 2; i++)
+            {
+                var r = Button(i);
+                Ui.Fill(g, r, 5 * k, hot == i ? (i == 1 ? Ui.Hex(0xE0182D) : Ui.Hex(0x3A3A40)) : Color.FromArgb(200, 28, 28, 31));
+                using (var pen = new Pen(Color.White, Math.Max(1.2f, 1.6f * k)))
+                {
+                    float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, a = r.Width * 0.22f;
+                    if (i == 0) g.DrawLine(pen, cx - a, cy, cx + a, cy);
+                    else { g.DrawLine(pen, cx - a, cy - a, cx + a, cy + a); g.DrawLine(pen, cx - a, cy + a, cx + a, cy - a); }
+                }
+            }
         }
 
         protected override void OnActivated(EventArgs e) { Invalidate(); base.OnActivated(e); }
@@ -1660,6 +1795,11 @@ namespace Shot
         {
             if (e.Button == MouseButtons.Middle) { Close(); return; }
             if (e.Button != MouseButtons.Left) return;
+            int b = ButtonAt(e.Location);
+            if (b == 0) { Minimize(); return; }
+            if (b == 1) { Close(); return; }
+            int edge = EdgeAt(e.Location);
+            if (edge != 0) { sizing = edge; sizeFrom = Bounds; sizeAt = Cursor.Position; Capture = true; return; }
             // Double-click closes; otherwise drag the pin around.
             int now = Environment.TickCount;
             if (now - lastClick < 450 && Math.Abs(Cursor.Position.X - lastAt.X) < 6 && Math.Abs(Cursor.Position.Y - lastAt.Y) < 6) { Close(); return; }
@@ -1667,6 +1807,12 @@ namespace Shot
             lastAt = Cursor.Position;
             Native.ReleaseCapture();
             Native.SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (sizing != 0) { sizing = 0; Capture = false; }
+            base.OnMouseUp(e);
         }
 
         protected override void OnMouseWheel(MouseEventArgs e) { ZoomBy(e.Delta / 120f); }
@@ -1679,6 +1825,7 @@ namespace Shot
             else if (ctrl && k == Keys.C) App.CopyImage(Img);
             else if (ctrl && k == Keys.S) App.SaveImage(Img, App.Cfg.AskWhere);
             else if (ctrl && k == Keys.T) App.ReadText(new Bitmap(Img));
+            else if (k == Keys.M && !e.Control) Minimize();
             else if (k == Keys.D0 || k == Keys.NumPad0) SetZoom(1);
             else if (k == Keys.Oemplus || k == Keys.Add) ZoomBy(1);
             else if (k == Keys.OemMinus || k == Keys.Subtract) ZoomBy(-1);
@@ -2927,7 +3074,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.3.0";
+        public const string Version = "2.4.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -3388,6 +3535,12 @@ namespace Shot
             check(d.Hotkey == c.Hotkey && !d.AskWhere && d.CopyOnSave && d.Size == 7 && d.SaveDir == c.SaveDir
                 && d.Color.ToArgb() == c.Color.ToArgb() && d.Marker.ToArgb() == c.Marker.ToArgb()
                 && d.CustomColors.Length == 2 && d.CustomColors[0] == 0x563412 && d.CustomColors[1] == 0xFFFFFF, "config round trip");
+            string pics = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), me = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string users = Path.GetDirectoryName(me.TrimEnd('\\'));
+            check(Config.Portable(Path.Combine(pics, "Shot")) == @"<Pictures>\Shot" && Config.Local(@"<Pictures>\Shot") == Path.Combine(pics, "Shot"), "save folder in Pictures is anyone's");
+            check(Config.Portable(Path.Combine(me, "Shots")) == @"%USERPROFILE%\Shots" && Config.Local(@"%USERPROFILE%\Shots") == Path.Combine(me, "Shots"), "save folder in the profile is anyone's");
+            check(Config.Local(Path.Combine(users, @"SomeoneElse\Pictures\Shot")) == Config.DefaultSaveDir, "someone else's folder becomes mine");
+            check(Config.Local(@"D:\Shots") == @"D:\Shots" && Config.Local(Path.Combine(users, @"Public\Shots")) == Path.Combine(users, @"Public\Shots"), "other folders stay");
             check(Ui.Hue(0) == Color.FromArgb(255, 0, 0) && Ui.Hue(120).ToArgb() == Color.FromArgb(0, 255, 0).ToArgb(), "colour wheel hues");
             var j = Config.Parse("hotkey =\nsize = 99\ncolor = nope\nno equals sign\n");
             check(j.Hotkey == Shortcut.Default && j.Size == Config.MaxSize && j.Color == Ui.Palette[0], "junk config falls back");

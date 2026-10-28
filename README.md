@@ -113,8 +113,10 @@ hold **Shift** for straight lines, squares and circles · **Ctrl + Z / Ctrl + Y*
 | Copy the text (OCR), with a preview | **Ctrl + T** |
 | Cancel | **Esc** or right-click |
 
-**Pins** stay on top: drag to move, **wheel** to zoom, **0** for actual size, **Ctrl + C / S / T** to copy,
-save or copy the text, **Esc** or double-click to close, right-click for a menu.
+**Pins** stay on top: drag to move, drag an **edge or corner** to resize (it keeps its shape), **wheel** to zoom,
+**0** for actual size, **Ctrl + C / S / T** to copy, save or copy the text, **Esc** or double-click to close,
+right-click for a menu. Point at a pin for its **–** and **×** buttons: **–** (or **M**) minimizes it to the
+taskbar, and clicking it there brings it back on top.
 
 ## Settings
 
@@ -124,7 +126,8 @@ Open them from the tray icon, or double-click `Shot.vbs` again while Shot runs.
 
 - **Capture shortcut**: click **Change** and press the keys.
 - **Saving**: the screenshots folder, whether Save asks where or saves straight to the folder, and
-  whether saving also copies.
+  whether saving also copies. The folder belongs to whoever uses this copy: by default their own
+  `Pictures\Shot`, so a copy you pass to a friend saves on their PC in their profile, not yours.
 - **Startup**: start Shot when you log in.
 
 A global shortcut belongs to Shot everywhere, so while Shot runs, Shift + Space no longer types a space in
