@@ -116,7 +116,9 @@ hold **Shift** for straight lines, squares and circles · **Ctrl + Z / Ctrl + Y*
 **Pins** stay on top: drag to move, drag an **edge or corner** to resize (it keeps its shape), **wheel** to zoom,
 **0** for actual size, **Ctrl + C / S / T** to copy, save or copy the text, **Esc** or double-click to close,
 right-click for a menu. Point at a pin for its **–** and **×** buttons: **–** (or **M**) minimizes it to the
-taskbar, and clicking it there brings it back on top.
+taskbar, and clicking it there brings it back on top. Pins step aside while you take the next screenshot;
+turn on **Show pins in screenshots** in Settings to keep them in it, for example to capture two pins side by
+side (then a click in the editor picks a pin, like a window).
 
 ## Settings
 
@@ -124,7 +126,7 @@ taskbar, and clicking it there brings it back on top.
 
 Open them from the tray icon, or double-click `Shot.vbs` again while Shot runs.
 
-- **Capture shortcut**: click **Change** and press the keys.
+- **Capture**: the shortcut (click **Change** and press the keys), and whether pins stay in your screenshots.
 - **Saving**: the screenshots folder, whether Save asks where or saves straight to the folder, and
   whether saving also copies. The folder belongs to whoever uses this copy: by default their own
   `Pictures\Shot`, so a copy you pass to a friend saves on their PC in their profile, not yours.

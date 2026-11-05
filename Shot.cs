@@ -359,6 +359,8 @@ namespace Shot
         /// Save button shows a dialog (true) or saves straight into SaveDir.
         public bool AskWhere = true;
         public bool CopyOnSave;
+        /// Pins stay on screen during a capture (true), or step aside so they are not in it.
+        public bool PinsInShots;
         public Color Color = Ui.Palette[0];
         /// The highlighter keeps its own colour so it stays yellow by default.
         public Color Marker = Ui.Palette[2];
@@ -384,6 +386,7 @@ namespace Shot
                     case "save_dir": if (v.Length > 0) c.SaveDir = Local(v); break;
                     case "save_mode": c.AskWhere = !v.Equals("folder", StringComparison.OrdinalIgnoreCase); break;
                     case "copy_on_save": c.CopyOnSave = v == "true" || v == "yes" || v == "1"; break;
+                    case "pins_in_shots": c.PinsInShots = v == "true" || v == "yes" || v == "1"; break;
                     case "color": if (Ui.TryHex(v, out col)) c.Color = col; break;
                     case "highlighter": if (Ui.TryHex(v, out col)) c.Marker = col; break;
                     case "size": if (int.TryParse(v, out n)) c.Size = Ui.Clamp(n, 1, MaxSize); break;
@@ -403,7 +406,8 @@ namespace Shot
                 "# Capture shortcut, e.g. Shift+Space, PrintScreen, Ctrl+Alt+KeyS\r\nhotkey = " + Hotkey + "\r\n\r\n" +
                 "# Where screenshots are saved. <Pictures> and %USERPROFILE% are whoever uses this copy.\r\nsave_dir = " + Portable(SaveDir) + "\r\n" +
                 "# ask = show a Save dialog; folder = save straight into save_dir\r\nsave_mode = " + (AskWhere ? "ask" : "folder") + "\r\n" +
-                "# Also copy the image to the clipboard when saving (true/false)\r\ncopy_on_save = " + (CopyOnSave ? "true" : "false") + "\r\n\r\n" +
+                "# Also copy the image to the clipboard when saving (true/false)\r\ncopy_on_save = " + (CopyOnSave ? "true" : "false") + "\r\n" +
+                "# Keep pins on screen, and in the picture, when capturing (true/false)\r\npins_in_shots = " + (PinsInShots ? "true" : "false") + "\r\n\r\n" +
                 "# Last used drawing style (updated automatically).\r\ncolor = " + Ui.ToHex(Color) + "\r\nhighlighter = " + Ui.ToHex(Marker) +
                 "\r\nsize = " + Size + "\r\ncustom_colors = " + string.Join(",", Array.ConvertAll(CustomColors,
                     v => Ui.ToHex(Color.FromArgb(v & 255, (v >> 8) & 255, (v >> 16) & 255)))) + "\r\n";
@@ -1712,7 +1716,10 @@ namespace Shot
             if (!hovering || h != hot) { hovering = true; hot = h; Invalidate(); }
             base.OnMouseMove(e);
         }
-        protected override void OnMouseLeave(EventArgs e) { hovering = false; hot = -1; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { Unhover(); base.OnMouseLeave(e); }
+
+        /// No minimize and close buttons: before a capture that keeps the pins in the picture.
+        internal void Unhover() { if (!hovering) return; hovering = false; hot = -1; Refresh(); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -1943,8 +1950,8 @@ namespace Shot
         static readonly Color BG = Ui.Hex(0x111113), CARD = Ui.Hex(0x1C1C1F), DIVIDER = Ui.Hex(0x2A2A2E), TEXT = Ui.Hex(0xF2F2F7),
             MUTED = Ui.Hex(0x8E8E96), CONTROL = Ui.Hex(0x2C2C30), CONTROL_HOVER = Ui.Hex(0x3A3A40), KNOB_OFF = Ui.Hex(0x3A3A3F),
             ACCENT = Ui.Hex(0xE0182D), GOOD = Ui.Hex(0x34C759);
-        const float W = 460, H = 606, Pad = 24, Inner = W - Pad * 2;
-        enum Hit { None = -1, Hotkey, ChangeFolder, ModeAsk, ModeFolder, CopyOnSave, Autostart, OpenFolder, Quit }
+        const float W = 460, H = 662, Pad = 24, Inner = W - Pad * 2;
+        enum Hit { None = -1, Hotkey, PinsInShots, ChangeFolder, ModeAsk, ModeFolder, CopyOnSave, Autostart, OpenFolder, Quit }
 
         readonly float sc;
         readonly Bitmap logo;
@@ -1971,19 +1978,20 @@ namespace Shot
         Rectangle R(float x, float y, float w, float h) { return new Rectangle(S(x), S(y), S(w), S(h)); }
         Rectangle RightOf(float y, float h, float w, float rh) { return R(Pad + Inner - 16 - w, y + (h - rh) / 2, w, rh); }
 
-        const float C1 = 120, C2 = 250, C3 = 450;
+        const float C1 = 120, C2 = 306, C3 = 506;
         Rectangle Zone(Hit h)
         {
             switch (h)
             {
                 case Hit.Hotkey: return R(Pad, C1, Inner, 62);
+                case Hit.PinsInShots: return R(Pad, C1 + 90, Inner, 56);
                 case Hit.ChangeFolder: return RightOf(C2, 56, 84, 30);
                 case Hit.ModeAsk: return R(Pad + Inner - 16 - 230, C2 + 69, 115, 30);
                 case Hit.ModeFolder: return R(Pad + Inner - 16 - 115, C2 + 69, 115, 30);
                 case Hit.CopyOnSave: return R(Pad, C2 + 112, Inner, 56);
                 case Hit.Autostart: return R(Pad, C3, Inner, 54);
-                case Hit.OpenFolder: return R(Pad, 556, 200, 28);
-                case Hit.Quit: return R(Pad + Inner - 92, 556, 92, 28);
+                case Hit.OpenFolder: return R(Pad, 612, 200, 28);
+                case Hit.Quit: return R(Pad + Inner - 92, 612, 92, 28);
             }
             return Rectangle.Empty;
         }
@@ -2019,6 +2027,7 @@ namespace Shot
             else if (h == Hit.ModeAsk) { cfg.AskWhere = true; App.SaveConfig(); }
             else if (h == Hit.ModeFolder) { cfg.AskWhere = false; App.SaveConfig(); }
             else if (h == Hit.CopyOnSave) { cfg.CopyOnSave = !cfg.CopyOnSave; App.SaveConfig(); }
+            else if (h == Hit.PinsInShots) { cfg.PinsInShots = !cfg.PinsInShots; App.SaveConfig(); }
             else if (h == Hit.Autostart) App.SetAutostart(!App.AutostartOn());
             else if (h == Hit.OpenFolder) App.OpenFolder();
             else if (h == Hit.Quit) App.Quit();
@@ -2079,8 +2088,8 @@ namespace Shot
             string ver = "v" + App.Version;
             Ui.Text(g, ver, Ui.Font(P(12)), MUTED, P(W - 24) - Ui.Measure(ver, Ui.Font(P(12))).Width, P(30));
 
-            string[] labels = { "CAPTURE SHORTCUT", "SAVING", "STARTUP" };
-            float[] ys = { C1, C2, C3 }, hs = { 90, 168, 80 };
+            string[] labels = { "CAPTURE", "SAVING", "STARTUP" };
+            float[] ys = { C1, C2, C3 }, hs = { 146, 168, 80 };
             for (int i = 0; i < 3; i++)
             {
                 Ui.Text(g, labels[i], Ui.Font(P(11)), MUTED, P(30), P(ys[i] - 22));
@@ -2105,6 +2114,10 @@ namespace Shot
                 Ui.Text(g, note, Ui.Font(P(12)), MUTED, P(54), ny);
             }
             else Ui.Text(g, note, Ui.Font(P(12)), App.Recording ? MUTED : ACCENT, P(40), ny);
+
+            Divider(g, S(C1 + 90));
+            TextMid(g, "Show pins in screenshots", P(40), P(C1 + 118), P(14), TEXT);
+            Toggle(g, RightOf(C1 + 90, 56, 44, 26), cfg.PinsInShots);
 
             // Saving card.
             Divider(g, S(C2 + 56));
@@ -3084,7 +3097,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.5.0";
+        public const string Version = "2.6.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -3374,9 +3387,12 @@ namespace Shot
             if (overlay != null || host == null) return;
             if (toast != null) toast.Close();
             // Pins and the spotlight must not end up in the screenshot; give the compositor a moment.
+            // Pins stay in the picture when Settings says so; then a click in the editor can pick one.
+            bool keepPins = Cfg.PinsInShots;
+            // A moment for the screen to catch up: pins hidden, or redrawn without their buttons.
             bool hide = Pins.Count > 0 || spotlight != null;
             if (spotlight != null) ToggleSpotlight();
-            foreach (var p in Pins) p.Visible = false;
+            foreach (var p in Pins) { if (keepPins) p.Unhover(); else p.Visible = false; }
             if (hide) Thread.Sleep(80);
             Bitmap shot;
             var v = SystemInformation.VirtualScreen;
@@ -3391,7 +3407,7 @@ namespace Shot
                 ShowToast("Capture failed: " + e.Message, 4);
                 return;
             }
-            var wins = WindowRects(v.Location);
+            var wins = WindowRects(v.Location, keepPins ? Pins.ConvertAll(p => p.Handle) : new List<IntPtr>());
             foreach (var p in Pins) p.Visible = true;
             var mons = new List<Rectangle>();
             var scales = new List<float>();
@@ -3408,7 +3424,7 @@ namespace Shot
         }
 
         /// Visible top-level windows of other apps, topmost first, in capture coordinates.
-        static List<Rectangle> WindowRects(Point origin)
+        static List<Rectangle> WindowRects(Point origin, List<IntPtr> pins)
         {
             var list = new List<Rectangle>();
             uint me = (uint)Process.GetCurrentProcess().Id;
@@ -3420,7 +3436,7 @@ namespace Shot
                 if (!Native.IsWindowVisible(h) || Native.IsIconic(h)) return true;
                 if (Native.DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return true;
                 Native.GetWindowThreadProcessId(h, out pid);
-                if (pid == me) return true;
+                if (pid == me && !pins.Contains(h)) return true;
                 if (Native.DwmGetWindowAttribute(h, 9, out r, 16) != 0 && !Native.GetWindowRect(h, out r)) return true;
                 var rc = Rectangle.FromLTRB(r.L - origin.X, r.T - origin.Y, r.R - origin.X, r.B - origin.Y);
                 if (rc.Width > 8 && rc.Height > 8) list.Add(rc);
@@ -3583,9 +3599,9 @@ namespace Shot
             check(!Shortcut.Parse("Ctrl+Nope", out mods, out vk), "unknown key refused");
             check(Shortcut.CodeOf(Keys.S) == "KeyS" && Shortcut.CodeOf(Keys.D1) == "Digit1", "key codes");
 
-            var c = new Config { Hotkey = "Ctrl+Shift+KeyA", AskWhere = false, CopyOnSave = true, Size = 7, Color = Ui.Hex(0x123456), Marker = Ui.Palette[3], CustomColors = new[] { 0x563412, 0xFFFFFF } };
+            var c = new Config { Hotkey = "Ctrl+Shift+KeyA", AskWhere = false, CopyOnSave = true, PinsInShots = true, Size = 7, Color = Ui.Hex(0x123456), Marker = Ui.Palette[3], CustomColors = new[] { 0x563412, 0xFFFFFF } };
             var d = Config.Parse(c.Render());
-            check(d.Hotkey == c.Hotkey && !d.AskWhere && d.CopyOnSave && d.Size == 7 && d.SaveDir == c.SaveDir
+            check(d.Hotkey == c.Hotkey && !d.AskWhere && d.CopyOnSave && d.PinsInShots && !new Config().PinsInShots && d.Size == 7 && d.SaveDir == c.SaveDir
                 && d.Color.ToArgb() == c.Color.ToArgb() && d.Marker.ToArgb() == c.Marker.ToArgb()
                 && d.CustomColors.Length == 2 && d.CustomColors[0] == 0x563412 && d.CustomColors[1] == 0xFFFFFF, "config round trip");
             string pics = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), me = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
