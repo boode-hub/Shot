@@ -1,4 +1,5 @@
-# Every push: compile Shot.ps1 and run its self-check on Windows PowerShell 5.1.
+# Every push: compile Shot and run its self-check on Windows PowerShell 5.1.
+# A version tag (v1.2.3): the same, then a signed release made from that tag.
 name: CI
 
 on:
@@ -14,3 +15,58 @@ jobs:
       - name: Self-check
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\Shot.ps1 -Test
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version and notes from the tag
+        # The tag's message is the release: its first line the title, the rest the notes.
+        run: |
+          git fetch --force origin "+${GITHUB_REF}:${GITHUB_REF}"
+          tag="${GITHUB_REF_NAME}"; version="${tag#v}"
+          built="$(grep -o 'public const string Version = "[0-9.]*"' Shot.cs | cut -d'"' -f2)"
+          if [ "$built" != "$version" ]; then
+            echo "::error::Shot.cs says $built, the tag says $version"; exit 1
+          fi
+          git for-each-ref "refs/tags/$tag" --format='%(contents:subject)' > title.txt
+          git for-each-ref "refs/tags/$tag" --format='%(contents:body)' > notes.md
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: The zip and its checksums
+        # Lets anyone confirm a download is intact, offline: sha256sum -c SHA256SUMS.txt
+        run: |
+          mkdir upload
+          git archive --prefix=Shot/ -o "upload/Shot-$VERSION.zip" HEAD \
+            Shot.ps1 Shot.cs Shot.vbs "Remove Shot.vbs" Remove.ps1 README.md LICENSE docs
+          (cd upload && sha256sum *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Sign the checksums
+        # Shot's "Check for updates" installs nothing that is not signed with this key;
+        # the public half is built into Shot (Updater.Modulus in Shot.cs).
+        env:
+          SHOT_SIGNING_KEY: ${{ secrets.SHOT_SIGNING_KEY }}
+        run: |
+          if [ -z "$SHOT_SIGNING_KEY" ]; then
+            echo "::error::The SHOT_SIGNING_KEY secret is missing: releases must be signed"; exit 1
+          fi
+          umask 077
+          printf '%s\n' "$SHOT_SIGNING_KEY" > key.pem
+          trap 'rm -f key.pem pub.pem' EXIT
+          have="$(openssl rsa -in key.pem -noout -modulus | cut -d= -f2 | tr 'A-F' 'a-f')"
+          want="$(grep -o 'internal const string Modulus = "[0-9a-fA-F]*"' Shot.cs | cut -d'"' -f2 | tr 'A-F' 'a-f')"
+          if [ -z "$want" ] || [ "$have" != "$want" ]; then
+            echo "::error::The signing key does not match the public key built into Shot"; exit 1
+          fi
+          openssl dgst -sha256 -sign key.pem -out upload/SHA256SUMS.txt.sig upload/SHA256SUMS.txt
+          openssl rsa -in key.pem -pubout -out pub.pem
+          openssl dgst -sha256 -verify pub.pem -signature upload/SHA256SUMS.txt.sig upload/SHA256SUMS.txt
+          ls -l upload
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" upload/* --verify-tag --latest \
+            --title "$(cat title.txt)" --notes-file notes.md

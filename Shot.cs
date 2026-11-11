@@ -11,6 +11,8 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -1951,7 +1953,7 @@ namespace Shot
             MUTED = Ui.Hex(0x8E8E96), CONTROL = Ui.Hex(0x2C2C30), CONTROL_HOVER = Ui.Hex(0x3A3A40), KNOB_OFF = Ui.Hex(0x3A3A3F),
             ACCENT = Ui.Hex(0xE0182D), GOOD = Ui.Hex(0x34C759);
         const float W = 460, H = 662, Pad = 24, Inner = W - Pad * 2;
-        enum Hit { None = -1, Hotkey, PinsInShots, ChangeFolder, ModeAsk, ModeFolder, CopyOnSave, Autostart, OpenFolder, Quit }
+        enum Hit { None = -1, Update, Hotkey, PinsInShots, ChangeFolder, ModeAsk, ModeFolder, CopyOnSave, Autostart, OpenFolder, Quit }
 
         readonly float sc;
         readonly Bitmap logo;
@@ -1983,6 +1985,7 @@ namespace Shot
         {
             switch (h)
             {
+                case Hit.Update: return R(W - 24 - 150, 50, 150, 22);
                 case Hit.Hotkey: return R(Pad, C1, Inner, 62);
                 case Hit.PinsInShots: return R(Pad, C1 + 90, Inner, 56);
                 case Hit.ChangeFolder: return RightOf(C2, 56, 84, 30);
@@ -2031,6 +2034,7 @@ namespace Shot
             else if (h == Hit.Autostart) App.SetAutostart(!App.AutostartOn());
             else if (h == Hit.OpenFolder) App.OpenFolder();
             else if (h == Hit.Quit) App.Quit();
+            else if (h == Hit.Update) App.CheckForUpdates();
             Invalidate();
         }
 
@@ -2087,6 +2091,9 @@ namespace Shot
             Ui.Text(g, "Capture, annotate, pin.", Ui.Font(P(13.5f)), MUTED, tx, P(56));
             string ver = "v" + App.Version;
             Ui.Text(g, ver, Ui.Font(P(12)), MUTED, P(W - 24) - Ui.Measure(ver, Ui.Font(P(12))).Width, P(30));
+            string up = App.UpdateNote ?? "Check for updates  \u203a";
+            Ui.Text(g, up, Ui.Font(P(12)), hover == Hit.Update && App.UpdateNote == null ? TEXT : App.UpdateNote != null ? ACCENT : MUTED,
+                P(W - 24) - Ui.Measure(up, Ui.Font(P(12))).Width, P(52));
 
             string[] labels = { "CAPTURE", "SAVING", "STARTUP" };
             float[] ys = { C1, C2, C3 }, hs = { 146, 168, 80 };
@@ -3093,11 +3100,279 @@ namespace Shot
         }
     }
 
+    // ----- updates -------------------------------------------------------------------------------
+
+    /// Updates from the GitHub releases, checked before anything is replaced. Every release
+    /// carries SHA256SUMS.txt and SHA256SUMS.txt.sig, an RSA signature that the release workflow
+    /// makes with a key nobody else holds. An update is used only when:
+    ///  1. the release is newer than this copy (never a downgrade),
+    ///  2. the signature verifies against the public key built into Shot (Modulus below),
+    ///  3. the zip's SHA-256 is the one in that signed list,
+    ///  4. every file in it unpacks inside one Shot\ folder, and
+    ///  5. the new copy, unpacked in data\update-new, passes its own self-check and says it is
+    ///     the version the release says.
+    /// Only then are this copy's files moved into data\update-old (a way back) and the new ones
+    /// moved in; any failure puts the old ones back. data\ itself (settings) is never replaced.
+    /// Shot goes online only when asked to check.
+    static class Updater
+    {
+        public const string LatestApi = "https://api.github.com/repos/boode-hub/Shot/releases/latest";
+        public const string Page = "https://github.com/boode-hub/Shot/releases/latest";
+        const string Sums = "SHA256SUMS.txt", Sig = "SHA256SUMS.txt.sig";
+        /// The public half of the release key: RSA-3072, exponent 65537. The release workflow
+        /// checks that its secret key matches this before it signs.
+        internal const string Modulus = "CB030AF21E96D3BF6BFF842B76133CF1CDA8E48CB7C2233F6E169EA5D23256A57235851BFD8B191C0D55B358ADC4DACB8D3D894627A920824C0F3A6A0CE1B89F25AF025714E4D8924F864BAE34C3F44641B2673976C7C35306866FBD090C51DC947A93093D2C6140EF3F500FD1312D49897F871AF3BFC4413A12F145E1661B03C7189AAFBCE9A58720656E6F4AAB226B62D47AEDCB682FD53873889F0C25493638914C077658E0348715550CD33A6988D9B1FE9CED9E742447D41EF554C46EACC3C0302F9895ACF74C25C88339D2E31096CA1D553DC252652223A76D6D3B02DA3A67F7D53C2C7B17A01B3B053D5551A17A9F375255B119EA771C02285533A3006C76E35C36D11AB48C8A0D4FD35E7E4EA98D7D8E921B548C40AC3722420DEF17DF267D1489EED91E6C52A9B9905AEAB61D81C8FCB6B6862EA78D865F689DB28CD63A9D6D621990D937650CCF67FDD4BF7B81106E24E4EFF083889556CF0C2C4C806A96FD40A2BC53A1DE19554183D7DACCF2F03FCA8F11628E433E512CF73E31";
+        const int MaxSmall = 1 << 20, MaxZip = 50 << 20;
+        const long MaxUnpacked = 100L << 20;
+
+        internal class Release
+        {
+            public Version Version;
+            public string Page;
+            public readonly Dictionary<string, KeyValuePair<string, long>> Assets = new Dictionary<string, KeyValuePair<string, long>>();
+            public string ZipName { get { return "Shot-" + Version + ".zip"; } }
+        }
+
+        /// major.minor.patch, with or without a v; anything else (2.7, 2.7.0-beta) is not a version.
+        internal static Version Parse(string s)
+        {
+            var m = Regex.Match(s ?? "", @"^\s*[vV]?(\d{1,9})\.(\d{1,9})\.(\d{1,9})\s*$");
+            return m.Success ? new Version(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value)) : null;
+        }
+
+        internal static Version Current { get { return Parse(App.Version); } }
+
+        static HttpWebRequest Request(string url)
+        {
+            // Windows PowerShell 5.1 does not offer TLS 1.2 to servers by itself.
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            var r = (HttpWebRequest)WebRequest.Create(url);
+            r.UserAgent = "Shot/" + App.Version + " (+" + Page + ")";
+            r.Accept = "application/vnd.github+json, application/octet-stream";
+            r.Timeout = 20000;
+            r.ReadWriteTimeout = 60000;
+            if (r.Proxy != null) r.Proxy.Credentials = CredentialCache.DefaultCredentials;
+            return r;
+        }
+
+        /// The whole answer, or an error: more than `limit` bytes is refused, not cut short.
+        internal static byte[] Get(string url, int limit)
+        {
+            try
+            {
+                using (var resp = Request(url).GetResponse())
+                using (var s = resp.GetResponseStream())
+                using (var mem = new MemoryStream())
+                {
+                    var buf = new byte[64 * 1024];
+                    for (int n; (n = s.Read(buf, 0, buf.Length)) > 0; )
+                    {
+                        mem.Write(buf, 0, n);
+                        if (mem.Length > limit) throw new IOException("the download is larger than expected");
+                    }
+                    return mem.ToArray();
+                }
+            }
+            catch (WebException e)
+            {
+                var r = e.Response as HttpWebResponse;
+                int code = r == null ? 0 : (int)r.StatusCode;
+                if (code == 403 || code == 429) throw new IOException("GitHub is limiting update checks from this network; try again in an hour.");
+                if (code == 404) throw new IOException("no release was found on GitHub.");
+                if (code != 0) throw new IOException("GitHub answered with an error (" + code + ").");
+                throw new IOException("Shot could not reach GitHub. Check the internet connection and try again.");
+            }
+        }
+
+        /// GitHub's latest release. SHOT_UPDATE_URL points elsewhere, for testing; whatever it
+        /// serves must still carry Shot's signature to be installed.
+        internal static Release Latest()
+        {
+            string url = Environment.GetEnvironmentVariable("SHOT_UPDATE_URL") ?? LatestApi;
+            return ParseRelease(Encoding.UTF8.GetString(Get(url, MaxSmall)));
+        }
+
+        internal static Release ParseRelease(string json)
+        {
+            Dictionary<string, object> v;
+            try { v = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json); }
+            catch { throw new IOException("GitHub sent something unexpected."); }
+            object o;
+            if (v.TryGetValue("draft", out o) && true.Equals(o) || v.TryGetValue("prerelease", out o) && true.Equals(o))
+                throw new IOException("the latest release is not a final release.");
+            string tag = v.TryGetValue("tag_name", out o) ? o as string : null;
+            var r = new Release { Version = Parse(tag), Page = v.TryGetValue("html_url", out o) && o is string ? (string)o : Page };
+            if (r.Version == null) throw new IOException("\u201c" + tag + "\u201d is not a version.");
+            if (v.TryGetValue("assets", out o) && o is System.Collections.ArrayList)
+                foreach (var a in (System.Collections.ArrayList)o)
+                {
+                    var d = a as Dictionary<string, object>;
+                    object name, link, size;
+                    if (d != null && d.TryGetValue("name", out name) && d.TryGetValue("browser_download_url", out link) && name is string && link is string)
+                        r.Assets[(string)name] = new KeyValuePair<string, long>((string)link, d.TryGetValue("size", out size) ? Convert.ToInt64(size, CultureInfo.InvariantCulture) : 0);
+                }
+            return r;
+        }
+
+        static byte[] Hex(string s)
+        {
+            var b = new byte[s.Length / 2];
+            for (int i = 0; i < b.Length; i++) b[i] = Convert.ToByte(s.Substring(2 * i, 2), 16);
+            return b;
+        }
+
+        /// Checks the signature over the checksum list, then returns the SHA-256 it lists for `name`.
+        internal static byte[] SignedHash(byte[] sums, byte[] sig, string name, string modulus)
+        {
+            using (var rsa = new RSACng())
+            {
+                rsa.ImportParameters(new RSAParameters { Modulus = Hex(modulus), Exponent = new byte[] { 1, 0, 1 } });
+                bool ok;
+                try { ok = rsa.VerifyData(sums, sig, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1); }
+                catch (CryptographicException) { ok = false; }
+                if (!ok) throw new IOException("the release is not signed with Shot's key.");
+            }
+            foreach (var raw in Encoding.UTF8.GetString(sums).Split('\n'))
+            {
+                // sha256sum writes "hash  name", or "hash *name" in binary mode.
+                var line = raw.TrimEnd('\r', ' ');
+                int sp = line.IndexOf(' ');
+                if (sp != 64 || line.Substring(sp).TrimStart(' ', '*') != name) continue;
+                if (!Regex.IsMatch(line.Substring(0, 64), "^[0-9a-fA-F]{64}$")) throw new IOException("the checksum for " + name + " is malformed.");
+                return Hex(line.Substring(0, 64));
+            }
+            throw new IOException(name + " is not in the signed checksum list.");
+        }
+
+        /// Downloads and checks an update: the small signed list first, so a release that is not
+        /// Shot's is refused before the zip is downloaded.
+        internal static byte[] Download(Release r, string modulus)
+        {
+            Func<string, KeyValuePair<string, long>> need = n =>
+            {
+                KeyValuePair<string, long> a;
+                if (!r.Assets.TryGetValue(n, out a)) throw new IOException("the release has no " + n + ".");
+                return a;
+            };
+            var zip = need(r.ZipName);
+            if (zip.Value > MaxZip) throw new IOException("the download is implausibly large.");
+            byte[] want = SignedHash(Get(need(Sums).Key, MaxSmall), Get(need(Sig).Key, MaxSmall), r.ZipName, modulus);
+            byte[] bytes = Get(zip.Key, MaxZip);
+            using (var sha = SHA256.Create())
+                if (!sha.ComputeHash(bytes).SequenceEqual(want)) throw new IOException("the download is damaged (its checksum does not match).");
+            return bytes;
+        }
+
+        /// Unpacks the release zip into `to`: every file inside its one Shot\ folder, no way out of it.
+        internal static void Unpack(byte[] zip, string to)
+        {
+            string root = Path.GetFullPath(to).TrimEnd('\\') + "\\";
+            long total = 0;
+            using (var a = new System.IO.Compression.ZipArchive(new MemoryStream(zip), System.IO.Compression.ZipArchiveMode.Read))
+                foreach (var e in a.Entries)
+                {
+                    string n = e.FullName.Replace('\\', '/');
+                    if (n.EndsWith("/")) continue;
+                    if (!n.StartsWith("Shot/")) throw new IOException("the zip holds files outside its Shot folder.");
+                    var parts = n.Substring(5).Split('/');
+                    if (parts.Any(p => p.Length == 0 || p == "." || p == ".." || p.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))
+                        throw new IOException("the zip holds an unsafe file name (" + n + ").");
+                    string path = Path.GetFullPath(Path.Combine(to, string.Join("\\", parts)));
+                    if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new IOException("the zip holds an unsafe file name (" + n + ").");
+                    if ((total += e.Length) > MaxUnpacked) throw new IOException("the zip unpacks implausibly large.");
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    using (var s = e.Open())
+                    using (var f = File.Create(path)) s.CopyTo(f);
+                }
+            foreach (var must in new[] { "Shot.ps1", "Shot.cs", "Shot.vbs" })
+                if (!File.Exists(Path.Combine(to, must))) throw new IOException("the zip holds no " + must + ".");
+        }
+
+        /// The unpacked copy must say it is `want`, and pass its own self-check.
+        static void SelfTest(string dir, Version want)
+        {
+            var m = Regex.Match(File.ReadAllText(Path.Combine(dir, "Shot.cs")), "public const string Version = \"([0-9.]+)\";");
+            if (!m.Success || !want.Equals(Parse(m.Groups[1].Value))) throw new IOException("the new copy says it is a different version.");
+            var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"" + Path.Combine(dir, "Shot.ps1") + "\" -Test")
+            {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = dir
+            };
+            using (var p = Process.Start(psi))
+            {
+                var output = p.StandardOutput.ReadToEndAsync();
+                var errors = p.StandardError.ReadToEndAsync();
+                // Generous: Windows may scan new scripts for a while before they run.
+                if (!p.WaitForExit(180000)) { try { p.Kill(); } catch { } throw new IOException("its self-check did not finish within 3 minutes."); }
+                string o = output.Result, err = errors.Result;
+                if (p.ExitCode == 0 && o.Split('\n').Any(l => l.Trim() == "ok")) return;
+                string why = (err + "\n" + o).Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+                throw new IOException("its self-check failed (" + (why ?? "exit code " + p.ExitCode) + ").");
+            }
+        }
+
+        /// Moves this copy's files aside into `old` and the new ones from `fresh` into `root`.
+        /// Anything that fails on the way puts everything back as it was.
+        internal static void Swap(string root, string fresh, string old)
+        {
+            if (Directory.Exists(old)) Directory.Delete(old, true);
+            Directory.CreateDirectory(old);
+            var names = Directory.EnumerateFileSystemEntries(fresh).Select(Path.GetFileName)
+                .Where(n => !n.Equals("data", StringComparison.OrdinalIgnoreCase)).ToList();
+            var aside = new List<string>();
+            var placed = new List<string>();
+            Action<string, string> move = (a, b) => { if (Directory.Exists(a)) Directory.Move(a, b); else File.Move(a, b); };
+            Func<string, bool> exists = p => File.Exists(p) || Directory.Exists(p);
+            try
+            {
+                foreach (var n in names) if (exists(Path.Combine(root, n))) { move(Path.Combine(root, n), Path.Combine(old, n)); aside.Add(n); }
+                foreach (var n in names) { move(Path.Combine(fresh, n), Path.Combine(root, n)); placed.Add(n); }
+            }
+            catch (Exception e)
+            {
+                foreach (var n in placed) try { move(Path.Combine(root, n), Path.Combine(fresh, n)); } catch { }
+                foreach (var n in aside) try { move(Path.Combine(old, n), Path.Combine(root, n)); } catch { }
+                throw new IOException("Shot cannot replace its files in " + root + " (" + e.Message + "). Download the new version from the release page instead.");
+            }
+        }
+
+        /// The whole update into the copy at `root`: download, check, unpack, self-check, swap.
+        /// `step` hears what is happening.
+        internal static void Install(string root, Release r, Action<string> step)
+        {
+            string data = Path.Combine(root, "data"), fresh = Path.Combine(data, "update-new"), old = Path.Combine(data, "update-old");
+            step("Downloading Shot " + r.Version + "\u2026");
+            byte[] zip = Download(r, Modulus);
+            try
+            {
+                if (Directory.Exists(fresh)) Directory.Delete(fresh, true);
+                Unpack(zip, fresh);
+                step("Checking Shot " + r.Version + "\u2026");
+                SelfTest(fresh, r.Version);
+                step("Installing Shot " + r.Version + "\u2026");
+                Swap(root, fresh, old);
+            }
+            finally { try { if (Directory.Exists(fresh)) Directory.Delete(fresh, true); } catch { } }
+        }
+
+        /// After an update has started properly, the way back is no longer needed.
+        internal static bool CleanUp(string root)
+        {
+            bool updated = false;
+            foreach (var n in new[] { "update-old", "update-new" })
+            {
+                string d = Path.Combine(root, "data", n);
+                if (!Directory.Exists(d)) continue;
+                updated |= n == "update-old";
+                try { Directory.Delete(d, true); } catch { }
+            }
+            return updated;
+        }
+    }
     // ----- the app: tray, shortcut, captures, outputs ---------------------------------------------
 
     public static class App
     {
-        public const string Version = "2.6.0";
+        public const string Version = "2.7.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -3152,7 +3427,9 @@ namespace Shot
             HotkeyError = Register(wanted);
             bool fallback = HotkeyError != null && Register(Fallback) == null;
             BuildTray();
-            if (first || openSettings) OpenSettings();
+            bool updated = Updater.CleanUp(root);
+            if (updated && !openSettings) ShowToast("Shot is updated to " + Version + ".", 4);
+            else if (first || openSettings) OpenSettings();
             else if (ActiveHotkey == null) ShowToast("No capture shortcut works. Open Settings from the tray icon.", 5);
             else if (fallback) ShowToast(Shortcut.Pretty(wanted) + " is used by another app, so Shot uses " + Shortcut.Pretty(ActiveHotkey) + ". Change it in Settings.", 5);
             else if (!captureNow) ShowToast("Shot is running. Press " + Shortcut.Pretty(ActiveHotkey) + " to capture.", 2.5f);
@@ -3162,6 +3439,71 @@ namespace Shot
             Application.Run();
             tray.Visible = false;
             tray.Dispose();
+        }
+
+        // ----- updates (see Updater) -------------------------------------------------------
+
+        /// What an update is doing right now, for Settings; null when nothing is.
+        internal static string UpdateNote;
+
+        static void Note(string s) { UpdateNote = s; if (settings != null) settings.Invalidate(); }
+
+        /// A message box in front of everything (Shot usually has no window of its own open).
+        static DialogResult Ask(string text, MessageBoxButtons buttons, MessageBoxIcon icon)
+        {
+            using (var front = new Form { TopMost = true, ShowInTaskbar = false, StartPosition = FormStartPosition.CenterScreen, Size = new Size(1, 1) })
+                return MessageBox.Show(settings != null && settings.Visible ? (IWin32Window)settings : front, text, "Shot", buttons, icon);
+        }
+
+        internal static void CheckForUpdates()
+        {
+            if (UpdateNote != null) return;
+            Note("Checking for updates\u2026");
+            var t = new Thread(() =>
+            {
+                Updater.Release r = null;
+                string error = null;
+                try { r = Updater.Latest(); }
+                catch (Exception e) { error = e.Message; }
+                host.BeginInvoke((Action)(() => Offer(r, error)));
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        static void Offer(Updater.Release r, string error)
+        {
+            Note(null);
+            if (error != null) { Ask("Shot could not check for updates: " + error, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (r.Version.CompareTo(Updater.Current) <= 0) { ShowToast("Shot " + Version + " is up to date.", 3); return; }
+            if (Ask("Shot " + r.Version + " is available (you have " + Version + ").\n\nUpdate now? Shot first checks that the download is signed with its own key "
+                + "and passes its self-check; only then are the files replaced. Your settings stay.\n\nWhat is new: " + r.Page,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
+            Note("Downloading Shot " + r.Version + "\u2026");
+            var t = new Thread(() =>
+            {
+                string failed = null;
+                try { Updater.Install(root, r, s => host.BeginInvoke((Action)(() => Note(s)))); }
+                catch (Exception e) { failed = e.Message; Log(e); }
+                host.BeginInvoke((Action)(() => Installed(r, failed)));
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        static void Installed(Updater.Release r, string failed)
+        {
+            Note(null);
+            if (failed != null) { Ask("Shot could not update to " + r.Version + ": " + failed + "\n\nNothing was changed.", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (Ask("Shot " + r.Version + " is installed. Restart Shot now?", MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
+            {
+                ShowToast("Shot " + r.Version + " starts the next time Shot does.", 4);
+                return;
+            }
+            // The new copy waits for this one to have quit, then starts.
+            try { Process.Start("wscript.exe", "//nologo \"" + LauncherPath + "\" -After " + Process.GetCurrentProcess().Id); }
+            catch (Exception e) { ShowToast("Restart Shot yourself: " + e.Message, 5); return; }
+            Quit();
         }
 
         internal static void Quit()
@@ -3200,6 +3542,7 @@ namespace Shot
             m.Items.Add("Open screenshots folder", null, (s, e) => OpenFolder());
             m.Items.Add("Close all pins", null, (s, e) => CloseAllPins());
             m.Items.Add(new ToolStripSeparator());
+            m.Items.Add("Check for updates\u2026", null, (s, e) => CheckForUpdates());
             m.Items.Add("Quit Shot", null, (s, e) => Quit());
             tray = new NotifyIcon { Icon = AppIcon, ContextMenuStrip = m };
             // Windows remembers tray icons by program and icon number. Every PowerShell tray app
@@ -3730,6 +4073,71 @@ namespace Shot
             check(Reader.Fix("on O.O.O.O:8O8O SN-2O26-1O28 l\u00f8.\u00f8.\u00f8.l") == "on 0.0.0.0:8080 SN-2026-1028 10.0.0.1", "zeros, serials, slashed zeros");
             check(Reader.Layout(Reader.Parse("0\t10\t10\t20\t20\te.\n0\t36\t10\t90\t20\t\u00f8.\u00f8.\u00f8:8080\n", 1, 0, null)) == "e.\u00f8.\u00f8.\u00f8:8080" && Reader.Fix("e.\u00f8.\u00f8.\u00f8:8080") == "0.0.0.0:8080", "an address split at a dot");
             check(Reader.Layout(Reader.Parse("0\t10\t10\t70\t20\t192.168.\n0\t84\t10\t30\t20\t1.10\n1\t10\t40\t30\t20\tIP:\n1\t46\t40\t60\t20\t10.0.0.1\n", 1, 0, null)) == "192.168.1.10\r\nIP: 10.0.0.1", "split addresses glued, words spaced");
+            // Updates: versions, the real key, GitHub's answer, safe unpacking, the swap and its undo.
+            check(Updater.Parse("v2.7.0").Equals(new Version(2, 7, 0)) && Updater.Parse("2.10.1").CompareTo(Updater.Parse("2.9.9")) > 0, "update versions");
+            check(new[] { "", "2.7", "2.7.0.1", "2.7.0-beta", "v", "2..0", "x2.7.0" }.All(x => Updater.Parse(x) == null), "odd versions refused");
+            check(Updater.Current != null, "this version is a version");
+            {
+                byte[] uSums = Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("ab", 32)) + "  Shot-9.9.9.zip\n");
+                string uHex = "b0f81b50a34c3a0fb5960ea90fd14e20680fa0f3290859b02252584aebfcdf9a712279461e727900955b13ae9a41d570f761108ba546ce8713ef87a2b3b753640f82436fa2d6fa5a8133b348247ae2c8f08abc1f2f8e168e915afca90a60ae8862fca0db814dc41ce7f49ed0c028ef029b2ac925191007eaa73d3111fbe34519861e0059ddef29ad56e1750094ac671c8da96ed771d15847a36209a38e7a31ba3a8e2ff00dc67a4caf3de6df14cf2f0316bdd42e010fc509a1788e178699d6e62de85ebf862b9fd9da7e82a94e3a69cdce50d84c879066baaad9e635e17fe49e30e637c6d56a7afdcdfac508c04f8ce06b71e59d80dc0d7853f86e92e7bbcfc3717ec7777752370de2f4a7cdf38245ced62757003f353793382aaa1c980e2cc3983d2561a72f9d9b14a05edbe1e7752163f830eb294c80bf8c5502a7afc3745f7742a3cc28a9e4d10d48e907360b45ac4ea53ae1dc90a871a3b9cf83267052a57050195426c822f614a8fddb00500cb108aa770b58b1efcf94f93bea16c2628c";
+                var uSig = Enumerable.Range(0, uHex.Length / 2).Select(i => Convert.ToByte(uHex.Substring(2 * i, 2), 16)).ToArray();
+                Func<byte[], byte[], string, string> uVerdict = (vs, vg, vn) => { try { return BitConverter.ToString(Updater.SignedHash(vs, vg, vn, Updater.Modulus)); } catch (IOException ue) { return ue.Message; } };
+                check(uVerdict(uSums, uSig, "Shot-9.9.9.zip") == string.Join("-", Enumerable.Repeat("AB", 32)), "the real key verifies a release signature");
+                var uBent = (byte[])uSums.Clone(); uBent[3] ^= 1;
+                check(uVerdict(uBent, uSig, "Shot-9.9.9.zip").Contains("not signed"), "a changed checksum list is refused");
+                var uCut = uSig.Take(uSig.Length - 1).ToArray();
+                check(uVerdict(uSums, uCut, "Shot-9.9.9.zip").Contains("not signed"), "a broken signature is refused");
+                check(uVerdict(uSums, uSig, "Shot-9.9.8.zip").Contains("not in the signed"), "another file is not vouched for");
+            }
+            {
+                var uRel = Updater.ParseRelease("{\"tag_name\":\"v3.1.4\",\"html_url\":\"https://x/r\",\"draft\":false,\"prerelease\":false,"
+                    + "\"assets\":[{\"name\":\"Shot-3.1.4.zip\",\"browser_download_url\":\"https://x/z\",\"size\":1234},{\"name\":\"broken\"}]}");
+                check(uRel.Version.Equals(new Version(3, 1, 4)) && uRel.ZipName == "Shot-3.1.4.zip" && uRel.Assets.Count == 1 && uRel.Assets["Shot-3.1.4.zip"].Value == 1234, "a GitHub release is read");
+                Func<string, bool> uRefused = uj => { try { Updater.ParseRelease(uj); return false; } catch (IOException) { return true; } };
+                check(uRefused("{\"tag_name\":\"v3.1.4\",\"prerelease\":true}") && uRefused("{\"tag_name\":\"v3.1.4\",\"draft\":true}")
+                    && uRefused("{\"tag_name\":\"nightly\"}") && uRefused("<html>rate limited</html>"), "odd GitHub answers refused");
+            }
+            {
+                Func<string[], byte[]> uZipOf = uNames =>
+                {
+                    using (var uMem = new MemoryStream())
+                    {
+                        using (var ua = new System.IO.Compression.ZipArchive(uMem, System.IO.Compression.ZipArchiveMode.Create, true))
+                            foreach (var un in uNames) using (var uw = new StreamWriter(ua.CreateEntry(un).Open())) uw.Write("new " + un);
+                        return uMem.ToArray();
+                    }
+                };
+                string uBox = Path.Combine(Path.GetTempPath(), "ShotUpdateTest" + Guid.NewGuid().ToString("N"));
+                Func<string[], string> uUnpack = uNames =>
+                {
+                    string uTo = Path.Combine(uBox, "u" + Guid.NewGuid().ToString("N"));
+                    try { Updater.Unpack(uZipOf(uNames), uTo); return "ok"; } catch (IOException ue) { return ue.Message; }
+                };
+                string[] uGood = { "Shot/Shot.ps1", "Shot/Shot.cs", "Shot/Shot.vbs", "Shot/docs/a.png" };
+                check(uUnpack(uGood) == "ok", "a release zip unpacks");
+                check(uUnpack(uGood.Concat(new[] { "Shot/../evil.txt" }).ToArray()).Contains("unsafe"), "a zip cannot write outside its folder");
+                check(uUnpack(uGood.Concat(new[] { "Other/x.txt" }).ToArray()).Contains("outside"), "a zip with other folders is refused");
+                check(uUnpack(new[] { "Shot/Shot.ps1", "Shot/Shot.cs" }).Contains("no Shot.vbs"), "a zip without the app is refused");
+
+                // The swap: old files go aside, new ones in, settings stay; a locked file undoes it all.
+                string uRoot = Path.Combine(uBox, "copy"), uFresh = Path.Combine(uBox, "fresh"), uOld = Path.Combine(uRoot, "data", "update-old");
+                Directory.CreateDirectory(Path.Combine(uRoot, "data"));
+                Directory.CreateDirectory(Path.Combine(uRoot, "docs"));
+                foreach (var un in new[] { "Shot.ps1", "Shot.cs", "Shot.vbs", "docs\\a.png", "data\\settings.txt" }) File.WriteAllText(Path.Combine(uRoot, un), "old " + un);
+                Updater.Unpack(uZipOf(uGood), uFresh);
+                using (File.Open(Path.Combine(uRoot, "Shot.vbs"), FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    string uWhy = null;
+                    try { Updater.Swap(uRoot, uFresh, uOld); } catch (IOException ue) { uWhy = ue.Message; }
+                    check(uWhy != null && File.ReadAllText(Path.Combine(uRoot, "Shot.ps1")) == "old Shot.ps1" && File.ReadAllText(Path.Combine(uRoot, "docs\\a.png")) == "old docs\\a.png"
+                        && File.Exists(Path.Combine(uFresh, "Shot.ps1")), "a failed swap puts everything back");
+                }
+                Updater.Swap(uRoot, uFresh, uOld);
+                check(File.ReadAllText(Path.Combine(uRoot, "Shot.ps1")) == "new Shot/Shot.ps1" && File.ReadAllText(Path.Combine(uRoot, "docs\\a.png")) == "new Shot/docs/a.png"
+                    && File.ReadAllText(Path.Combine(uOld, "Shot.ps1")) == "old Shot.ps1" && File.ReadAllText(Path.Combine(uRoot, "data\\settings.txt")) == "old data\\settings.txt", "a swap keeps the old files and the settings");
+                check(Updater.CleanUp(uRoot) && !Directory.Exists(uOld) && !Updater.CleanUp(uRoot), "the way back goes once the new copy runs");
+                Directory.Delete(uBox, true);
+            }
             // A | that OCR read as l, next to an l that is an l.
             using (var bmp = new Bitmap(260, 40))
             using (var font = new Font("Segoe UI", 20, GraphicsUnit.Pixel))

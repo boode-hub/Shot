@@ -14,10 +14,13 @@
 
   Remove Shot.vbs (Remove.ps1) takes it out of start-up and can recycle the folder.
 #>
-param([switch]$Capture, [switch]$Settings, [switch]$Test)
+param([switch]$Capture, [switch]$Settings, [switch]$Test, [int]$After)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+
+# After an update, the new copy waits for the old one to have quit.
+if ($After) { Wait-Process -Id $After -Timeout 30 -ErrorAction SilentlyContinue }
 
 # One Shot per user. A second launch asks the running one to show Settings.
 if (-not $Test) {
@@ -33,7 +36,7 @@ if (-not $Test) {
 # (named by a fingerprint of Shot.cs), so starting takes about a second; a folder that
 # cannot be written to compiles it in memory each time instead.
 $cs = Join-Path $PSScriptRoot 'Shot.cs'
-$refs = 'System.Windows.Forms', 'System.Drawing'
+$refs = 'System.Windows.Forms', 'System.Drawing', 'System.Web.Extensions', 'System.IO.Compression'
 function Use-Shot {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $id = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($cs)), 0, 8).Replace('-', '')

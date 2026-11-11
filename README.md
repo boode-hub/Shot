@@ -41,8 +41,17 @@ Turn on **Start Shot when I log in** in Settings to keep it running: it adds thi
 your start-up apps (the per-user Run key, no admin needed). Turn it off to remove it. If you move the
 folder, turn it off and on again.
 
-To update, quit Shot from its tray icon and extract the new release over the old folder (your `data` folder
-stays), or run `git pull`.
+**To update**, click **Check for updates** in Settings (under the version), or in the tray icon's menu.
+Shot goes online only then. When there is a newer release, it asks first, and installs it only once:
+
+- the release is **signed** with Shot's own key, whose public half is built into Shot;
+- the download matches its signed **checksum**;
+- every file in it unpacks inside its own folder;
+- the new version, unpacked beside this one, passes its own **self-check** and says it is that version.
+
+Only then are the files replaced; the old ones are kept in `data\update-old` until the new version has
+started, and anything that fails on the way leaves Shot exactly as it was. Your settings stay. You can also
+extract a new release over the old folder yourself (keep `data`), or run `git pull`.
 
 **To remove Shot**, double-click `Remove Shot.vbs`. It asks first, then:
 
