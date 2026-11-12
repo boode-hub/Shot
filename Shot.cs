@@ -148,6 +148,30 @@ namespace Shot
             using (var b = new SolidBrush(c)) g.DrawString(t, f, b, x, y, Fmt);
         }
 
+        // Window text (Settings, messages, the editor's labels) is drawn the way Windows draws its own
+        // windows: native ClearType, sharper than GDI+ smoothing. Text that goes into a screenshot
+        // keeps Text and Measure above, so no ClearType colour fringes end up in the picture.
+        const TextFormatFlags LabelFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine
+            | TextFormatFlags.PreserveGraphicsClipping | TextFormatFlags.PreserveGraphicsTranslateTransform;
+
+        public static void Label(Graphics g, string t, Font f, Color c, float x, float y)
+        {
+            // TextRenderer takes its smoothing from the Graphics: the system's own (ClearType, as the
+            // person has tuned it), not the grayscale that shape drawing here sets.
+            var hint = g.TextRenderingHint;
+            g.TextRenderingHint = TextRenderingHint.SystemDefault;
+            TextRenderer.DrawText(g, t, f, new Point((int)Math.Round(x), (int)Math.Round(y)), c, LabelFlags);
+            g.TextRenderingHint = hint;
+        }
+
+        public static SizeF LabelSize(string t, Font f)
+        {
+            var s = TextRenderer.MeasureText(string.IsNullOrEmpty(t) ? " " : t, f, new Size(int.MaxValue, int.MaxValue), LabelFlags);
+            return new SizeF(string.IsNullOrEmpty(t) ? 0 : s.Width, s.Height);
+        }
+
+        public static float LabelHeight(Font f) { return LabelSize("Ag", f).Height; }
+
         public static GraphicsPath Round(RectangleF r, float rad)
         {
             var p = new GraphicsPath();
@@ -1383,7 +1407,7 @@ namespace Shot
 
         SizeF PillSize(string t, float px)
         {
-            var s = Ui.Measure(t, Ui.Font(px));
+            var s = Ui.LabelSize(t, Ui.Font(px));
             float k = Sc();
             return new SizeF(s.Width + 16 * k, s.Height + 8 * k);
         }
@@ -1393,7 +1417,7 @@ namespace Shot
             float k = Sc();
             var sz = PillSize(t, px);
             Ui.Panel(g, new Rectangle((int)Math.Round(x), (int)Math.Round(y), (int)Math.Ceiling(sz.Width), (int)Math.Ceiling(sz.Height)), 6 * k);
-            Ui.Text(g, t, Ui.Font(px), Ui.Icon, x + 8 * k, y + 4 * k);
+            Ui.Label(g, t, Ui.Font(px), Ui.Icon, x + 8 * k, y + 4 * k);
         }
 
         void RenderSelection(Graphics g)
@@ -1811,7 +1835,7 @@ namespace Shot
             msg = text;
             var mon = Screen.PrimaryScreen.Bounds;
             sc = Native.ScaleAt(new Point(mon.X + mon.Width / 2, mon.Y + mon.Height / 2));
-            var s = Ui.Measure(msg, Ui.Font(15 * sc));
+            var s = Ui.LabelSize(msg, Ui.Font(15 * sc));
             var size = new Size((int)Math.Ceiling(s.Width + 32 * sc), (int)Math.Ceiling(s.Height + 20 * sc));
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -1835,7 +1859,7 @@ namespace Shot
         {
             e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using (var pen = new Pen(Ui.Hex(0x3A3A40))) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
-            Ui.Text(e.Graphics, msg, Ui.Font(15 * sc), Ui.Icon, 16 * sc, 10 * sc);
+            Ui.Label(e.Graphics, msg, Ui.Font(15 * sc), Ui.Icon, 16 * sc, 10 * sc);
         }
         protected override void OnMouseDown(MouseEventArgs e) { Close(); }
         protected override void OnFormClosed(FormClosedEventArgs e) { timer.Dispose(); base.OnFormClosed(e); }
@@ -2087,19 +2111,19 @@ namespace Shot
             // Header: logo, name, tagline, version.
             g.DrawImage(logo, S(Pad), S(24), logo.Width, logo.Height);
             float tx = P(Pad + 52 + 14);
-            Ui.Text(g, "Shot", Ui.Font(P(24), true), TEXT, tx, P(24));
-            Ui.Text(g, "Capture, annotate, pin.", Ui.Font(P(13.5f)), MUTED, tx, P(56));
+            Ui.Label(g, "Shot", Ui.Font(P(24), true), TEXT, tx, P(24));
+            Ui.Label(g, "Capture, annotate, pin.", Ui.Font(P(13.5f)), MUTED, tx, P(56));
             string ver = "v" + App.Version;
-            Ui.Text(g, ver, Ui.Font(P(12)), MUTED, P(W - 24) - Ui.Measure(ver, Ui.Font(P(12))).Width, P(30));
+            Ui.Label(g, ver, Ui.Font(P(12)), MUTED, P(W - 24) - Ui.LabelSize(ver, Ui.Font(P(12))).Width, P(30));
             string up = App.UpdateNote ?? "Check for updates  \u203a";
-            Ui.Text(g, up, Ui.Font(P(12)), hover == Hit.Update && App.UpdateNote == null ? TEXT : App.UpdateNote != null ? ACCENT : MUTED,
-                P(W - 24) - Ui.Measure(up, Ui.Font(P(12))).Width, P(52));
+            Ui.Label(g, up, Ui.Font(P(12)), hover == Hit.Update && App.UpdateNote == null ? TEXT : App.UpdateNote != null ? ACCENT : MUTED,
+                P(W - 24) - Ui.LabelSize(up, Ui.Font(P(12))).Width, P(52));
 
             string[] labels = { "CAPTURE", "SAVING", "STARTUP" };
             float[] ys = { C1, C2, C3 }, hs = { 146, 168, 80 };
             for (int i = 0; i < 3; i++)
             {
-                Ui.Text(g, labels[i], Ui.Font(P(11)), MUTED, P(30), P(ys[i] - 22));
+                Ui.Label(g, labels[i], Ui.Font(P(11)), MUTED, P(30), P(ys[i] - 22));
                 Ui.Fill(g, R(Pad, ys[i], Inner, hs[i]), P(12), CARD);
             }
 
@@ -2118,9 +2142,9 @@ namespace Shot
             if (!App.Recording && App.HotkeyError == null && App.ActiveHotkey != null)
             {
                 using (var b = new SolidBrush(GOOD)) g.FillEllipse(b, P(44 - 3.5f), ny + P(7.5f - 3.5f), P(7), P(7));
-                Ui.Text(g, note, Ui.Font(P(12)), MUTED, P(54), ny);
+                Ui.Label(g, note, Ui.Font(P(12)), MUTED, P(54), ny);
             }
-            else Ui.Text(g, note, Ui.Font(P(12)), App.Recording ? MUTED : ACCENT, P(40), ny);
+            else Ui.Label(g, note, Ui.Font(P(12)), App.Recording ? MUTED : ACCENT, P(40), ny);
 
             Divider(g, S(C1 + 90));
             TextMid(g, "Show pins in screenshots", P(40), P(C1 + 118), P(14), TEXT);
@@ -2150,7 +2174,7 @@ namespace Shot
             TextMid(g, "Start Shot when I log in", P(40), P(C3 + 27), P(14), TEXT);
             Toggle(g, RightOf(C3, 54, 44, 26), on);
             string install = on ? "Runs " + App.LauncherPath + " at every login." : "Runs this copy at every login; nothing is installed.";
-            Ui.Text(g, Ellipsize(install, Ui.Font(P(11.5f)), P(W - 80)), Ui.Font(P(11.5f)), MUTED, P(40), P(C3 + 50));
+            Ui.Label(g, Ellipsize(install, Ui.Font(P(11.5f)), P(W - 80)), Ui.Font(P(11.5f)), MUTED, P(40), P(C3 + 50));
 
             // Footer.
             var of = Zone(Hit.OpenFolder);
@@ -2169,9 +2193,9 @@ namespace Shot
                 if (i > 0)
                 {
                     TextMid(g, "+", x + P(7), cy, fs, MUTED);
-                    x += Ui.Measure("+", Ui.Font(fs)).Width + P(14);
+                    x += Ui.LabelSize("+", Ui.Font(fs)).Width + P(14);
                 }
-                float w = Math.Max(Ui.Measure(caps[i], Ui.Font(fs)).Width + P(24), h);
+                float w = Math.Max(Ui.LabelSize(caps[i], Ui.Font(fs)).Width + P(24), h);
                 var r = Rectangle.Round(new RectangleF(x, cy - h / 2, w, h));
                 // A keyboard key: a darker bottom edge under a lighter face.
                 var face = new Rectangle(r.X, r.Y, r.Width, r.Height - S(2));
@@ -2205,23 +2229,23 @@ namespace Shot
         void TextMid(Graphics g, string t, float x, float cy, float px, Color c)
         {
             var f = Ui.Font(px);
-            Ui.Text(g, t, f, c, x, cy - Ui.LineHeight(f) / 2);
+            Ui.Label(g, t, f, c, x, cy - Ui.LabelHeight(f) / 2);
         }
 
         void TextCenter(Graphics g, string t, Rectangle r, float px, Color c)
         {
-            TextMid(g, t, r.X + (r.Width - Ui.Measure(t, Ui.Font(px)).Width) / 2, r.Y + r.Height / 2f, px, c);
+            TextMid(g, t, r.X + (r.Width - Ui.LabelSize(t, Ui.Font(px)).Width) / 2, r.Y + r.Height / 2f, px, c);
         }
 
         /// Shorten with an ellipsis in the middle, keeping the end of a path visible.
         static string Ellipsize(string t, Font f, float maxW)
         {
-            if (Ui.Measure(t, f).Width <= maxW) return t;
+            if (Ui.LabelSize(t, f).Width <= maxW) return t;
             for (int keep = t.Length - 1; keep > 4; keep--)
             {
                 int head = keep / 3;
                 string s = t.Substring(0, head) + "\u2026" + t.Substring(t.Length - (keep - head));
-                if (Ui.Measure(s, f).Width <= maxW) return s;
+                if (Ui.LabelSize(s, f).Width <= maxW) return s;
             }
             return "\u2026";
         }
@@ -3372,7 +3396,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.7.0";
+        public const string Version = "2.7.1";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
