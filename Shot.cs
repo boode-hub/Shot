@@ -1607,12 +1607,12 @@ namespace Shot
     /// A pinned screenshot: always on top, drag to move, wheel to zoom.
     class Pin : Form
     {
-        internal readonly Bitmap Img;
+        internal Bitmap Img { get; private set; }
         float zoom = 1;
         int lastClick;
         Point lastAt;
         bool hovering, minimized;
-        int hot = -1;   // the corner button under the mouse: 0 minimize, 1 close
+        int hot = -1;   // the corner button under the mouse: 0 edit, 1 minimize, 2 close
 
         public Pin(Bitmap img, Point at)
         {
@@ -1628,15 +1628,36 @@ namespace Shot
             ClientSize = img.Size;
             DoubleBuffered = true;
             var m = new ContextMenuStrip();
+            Item(m, "Edit (mark up)", "E", () => App.EditPin(this, false));
+            Item(m, "Crop", "C", () => App.EditPin(this, true));
             Item(m, "Copy", "Ctrl+C", () => App.CopyImage(Img));
             Item(m, "Save\u2026", "Ctrl+S", () => App.SaveImage(Img, App.Cfg.AskWhere));
             Item(m, "Copy text (OCR)", "Ctrl+T", () => App.ReadText(new Bitmap(Img)));
             Item(m, "Actual size", "0", () => SetZoom(1));
             Item(m, "Minimize", "M", Minimize);
+            var see = new ToolStripMenuItem("See-through") { ShortcutKeyDisplayString = "Ctrl+wheel" };
+            foreach (int pct in new[] { 100, 80, 60, 40, 20 })
+            {
+                int v = pct;
+                see.DropDownItems.Add(new ToolStripMenuItem(pct + "%", null, (s, e) => SetOpacity(v / 100.0)));
+            }
+            m.Items.Add(see);
+            m.Opening += (s, e) => { foreach (ToolStripMenuItem it in see.DropDownItems) it.Checked = it.Text == (int)Math.Round(Opacity * 100) + "%"; };
             m.Items.Add(new ToolStripSeparator());
             Item(m, "Close", "Esc", Close);
             Item(m, "Close all pins", "", App.CloseAllPins);
             ContextMenuStrip = m;
+        }
+
+        /// A marked-up picture in place of the old one, shown at its own size.
+        internal void SetImage(Bitmap img)
+        {
+            var old = Img;
+            Img = img;
+            old.Dispose();
+            zoom = 1;
+            ClientSize = img.Size;
+            Invalidate();
         }
 
         static void Item(ContextMenuStrip m, string text, string keys, Action a)
@@ -1725,14 +1746,15 @@ namespace Shot
             Bounds = new Rectangle((sizing & 1) != 0 ? sizeFrom.Right - nw : sizeFrom.X, (sizing & 4) != 0 ? sizeFrom.Bottom - nh : sizeFrom.Y, nw, nh);
         }
 
-        // The minimize and close buttons in the top right corner, shown while the mouse is over the pin.
+        // The edit, minimize and close buttons in the top right corner, shown while the mouse is over the pin.
+        const int Buttons = 3;
         Rectangle Button(int i)
         {
             int s = (int)(22 * Sc), gap = (int)(6 * Sc);
-            return new Rectangle(ClientSize.Width - gap - (2 - i) * s - (1 - i) * gap, gap, s, s);
+            return new Rectangle(ClientSize.Width - gap - (Buttons - i) * s - (Buttons - 1 - i) * gap, gap, s, s);
         }
-        bool ButtonsFit { get { return ClientSize.Width >= Button(0).Width * 4 && ClientSize.Height >= Button(0).Height * 2; } }
-        int ButtonAt(Point p) { if (!ButtonsFit) return -1; for (int i = 0; i < 2; i++) if (Button(i).Contains(p)) return i; return -1; }
+        bool ButtonsFit { get { return ClientSize.Width >= Button(0).Width * 5 && ClientSize.Height >= Button(0).Height * 2; } }
+        int ButtonAt(Point p) { if (!ButtonsFit) return -1; for (int i = 0; i < Buttons; i++) if (Button(i).Contains(p)) return i; return -1; }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
@@ -1759,14 +1781,20 @@ namespace Shot
             if (!hovering || !ButtonsFit) return;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             float k = Sc;
-            for (int i = 0; i < 2; i++)
+            for (int i = 0; i < Buttons; i++)
             {
                 var r = Button(i);
-                Ui.Fill(g, r, 5 * k, hot == i ? (i == 1 ? Ui.Hex(0xE0182D) : Ui.Hex(0x3A3A40)) : Color.FromArgb(200, 28, 28, 31));
+                Ui.Fill(g, r, 5 * k, hot == i ? (i == 2 ? Ui.Hex(0xE0182D) : Ui.Hex(0x3A3A40)) : Color.FromArgb(200, 28, 28, 31));
                 using (var pen = new Pen(Color.White, Math.Max(1.2f, 1.6f * k)))
                 {
                     float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, a = r.Width * 0.22f;
-                    if (i == 0) g.DrawLine(pen, cx - a, cy, cx + a, cy);
+                    if (i == 0)
+                    {
+                        // A pencil: a slanted shaft and its point.
+                        using (var shaft = Ui.RoundPen(Color.White, Math.Max(2f, 2.6f * k))) g.DrawLine(shaft, cx - a * 0.45f, cy + a * 0.45f, cx + a, cy - a);
+                        using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, new[] { new PointF(cx - a * 1.1f, cy + a * 1.1f), new PointF(cx - a * 0.75f, cy + a * 0.05f), new PointF(cx - a * 0.05f, cy + a * 0.75f) });
+                    }
+                    else if (i == 1) g.DrawLine(pen, cx - a, cy, cx + a, cy);
                     else { g.DrawLine(pen, cx - a, cy - a, cx + a, cy + a); g.DrawLine(pen, cx - a, cy + a, cx + a, cy - a); }
                 }
             }
@@ -1780,8 +1808,9 @@ namespace Shot
             if (e.Button == MouseButtons.Middle) { Close(); return; }
             if (e.Button != MouseButtons.Left) return;
             int b = ButtonAt(e.Location);
-            if (b == 0) { Minimize(); return; }
-            if (b == 1) { Close(); return; }
+            if (b == 0) { App.EditPin(this, false); return; }
+            if (b == 1) { Minimize(); return; }
+            if (b == 2) { Close(); return; }
             int edge = EdgeAt(e.Location);
             if (edge != 0) { sizing = edge; sizeFrom = Bounds; sizeAt = Cursor.Position; Capture = true; return; }
             // Double-click closes; otherwise drag the pin around.
@@ -1799,7 +1828,14 @@ namespace Shot
             base.OnMouseUp(e);
         }
 
-        protected override void OnMouseWheel(MouseEventArgs e) { ZoomBy(e.Delta / 120f); }
+        /// Ctrl + wheel fades the pin, down to a fifth, to lay a screenshot over what it shows now and compare.
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            if ((ModifierKeys & Keys.Control) != 0) SetOpacity(Opacity + Math.Sign(e.Delta) * 0.1);
+            else ZoomBy(e.Delta / 120f);
+        }
+
+        void SetOpacity(double v) { Opacity = Math.Max(0.2, Math.Min(1, Math.Round(v * 10) / 10)); }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
@@ -1810,6 +1846,8 @@ namespace Shot
             else if (ctrl && k == Keys.S) App.SaveImage(Img, App.Cfg.AskWhere);
             else if (ctrl && k == Keys.T) App.ReadText(new Bitmap(Img));
             else if (k == Keys.M && !e.Control) Minimize();
+            else if (k == Keys.E && !e.Control) App.EditPin(this, false);
+            else if (k == Keys.C && !e.Control) App.EditPin(this, true);
             else if (k == Keys.D0 || k == Keys.NumPad0) SetZoom(1);
             else if (k == Keys.Oemplus || k == Keys.Add) ZoomBy(1);
             else if (k == Keys.OemMinus || k == Keys.Subtract) ZoomBy(-1);
@@ -3396,7 +3434,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.7.1";
+        public const string Version = "2.8.0";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -3749,7 +3787,18 @@ namespace Shot
             if (!wasOn && overlay == null) { spotlight = new Spotlight(); spotlight.Show(); }
         }
 
-        internal static void StartCapture()
+        internal static void StartCapture() { Capture(null, false); }
+
+        /// The pin being marked up again, or null for an ordinary capture.
+        static Pin editing;
+
+        /// A pin goes back into the editor: the screen as it is, with the pin's picture at its own
+        /// size where the pin is, already selected, and the whole toolbar. Finishing puts the
+        /// marked-up picture back in the pin (Copy and Save also copy or save it); Esc leaves it be.
+        /// `crop`: start with Move / resize, so the selection's edges can be dragged in to cut the pin down.
+        internal static void EditPin(Pin pin, bool crop) { if (pin.Visible && pin.WindowState == FormWindowState.Normal) Capture(pin, crop); }
+
+        static void Capture(Pin edit, bool crop)
         {
             if (overlay != null || host == null) return;
             if (toast != null) toast.Close();
@@ -3759,7 +3808,7 @@ namespace Shot
             // A moment for the screen to catch up: pins hidden, or redrawn without their buttons.
             bool hide = Pins.Count > 0 || spotlight != null;
             if (spotlight != null) ToggleSpotlight();
-            foreach (var p in Pins) { if (keepPins) p.Unhover(); else p.Visible = false; }
+            foreach (var p in Pins) { if (keepPins && p != edit) p.Unhover(); else p.Visible = false; }
             if (hide) Thread.Sleep(80);
             Bitmap shot;
             var v = SystemInformation.VirtualScreen;
@@ -3774,8 +3823,17 @@ namespace Shot
                 ShowToast("Capture failed: " + e.Message, 4);
                 return;
             }
-            var wins = WindowRects(v.Location, keepPins ? Pins.ConvertAll(p => p.Handle) : new List<IntPtr>());
-            foreach (var p in Pins) p.Visible = true;
+            var wins = WindowRects(v.Location, keepPins ? Pins.FindAll(p => p != edit).ConvertAll(p => p.Handle) : new List<IntPtr>());
+            foreach (var p in Pins) if (p != edit) p.Visible = true;
+            var sel = Rectangle.Empty;
+            if (edit != null)
+            {
+                // The pin's own picture, full size, where the pin is (moved in if it would hang off the screen).
+                var img = edit.Img;
+                int x = Ui.Clamp(edit.Left - v.X, 0, Math.Max(0, v.Width - img.Width)), y = Ui.Clamp(edit.Top - v.Y, 0, Math.Max(0, v.Height - img.Height));
+                using (var g = Graphics.FromImage(shot)) g.DrawImage(img, new Rectangle(x, y, img.Width, img.Height), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel);
+                sel = Rectangle.Intersect(new Rectangle(x, y, img.Width, img.Height), new Rectangle(0, 0, v.Width, v.Height));
+            }
             var mons = new List<Rectangle>();
             var scales = new List<float>();
             foreach (var s in Screen.AllScreens)
@@ -3785,6 +3843,15 @@ namespace Shot
                 scales.Add(Native.ScaleAt(new Point(b.X + b.Width / 2, b.Y + b.Height / 2)));
             }
             overlay = new Overlay(shot, v, wins, mons, scales, Cfg, Ocr != null);
+            editing = edit;
+            if (edit != null)
+            {
+                overlay.Sel = sel;
+                overlay.HasSel = true;
+                // To mark it up, a drawing tool, not Move: a drag on the picture marks it rather than moving
+                // the selection off it. To crop it, Move / resize: every edge of the selection can be dragged.
+                overlay.Tool = crop ? Tool.Select : Tool.Rect;
+            }
             overlay.Show();
             overlay.Activate();
             Native.SetForegroundWindow(overlay.Handle);
@@ -3814,7 +3881,13 @@ namespace Shot
             return list;
         }
 
-        internal static void OverlayClosed(Overlay o) { if (overlay == o) overlay = null; }
+        internal static void OverlayClosed(Overlay o)
+        {
+            if (overlay != o) return;
+            overlay = null;
+            // Closed some other way while a pin was in it: the pin comes back as it was.
+            if (editing != null) { editing.Visible = true; editing = null; }
+        }
 
         /// What to do with a finished capture.
         internal static void Run(Overlay o, Cmd cmd)
@@ -3830,8 +3903,18 @@ namespace Shot
                 Cfg.Size = o.StyleSize;
                 SaveConfig();
             }
+            var edit = editing;
+            editing = null;
             overlay = null;
             o.Close();
+            if (edit != null)
+            {
+                // The pin takes the marked-up picture (or keeps its own, on Esc), where the selection was.
+                if (img != null) { edit.SetImage(new Bitmap(img)); edit.Location = at; }
+                edit.Visible = true;
+                edit.Activate();
+                if (cmd == Cmd.Pin && img != null) { img.Dispose(); return; }
+            }
             if (img == null) return;
             switch (cmd)
             {

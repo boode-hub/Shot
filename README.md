@@ -124,8 +124,16 @@ hold **Shift** for straight lines, squares and circles · **Ctrl + Z / Ctrl + Y*
 
 **Pins** stay on top: drag to move, drag an **edge or corner** to resize (it keeps its shape), **wheel** to zoom,
 **0** for actual size, **Ctrl + C / S / T** to copy, save or copy the text, **Esc** or double-click to close,
-right-click for a menu. Point at a pin for its **–** and **×** buttons: **–** (or **M**) minimizes it to the
-taskbar, and clicking it there brings it back on top. Pins step aside while you take the next screenshot;
+right-click for a menu. Point at a pin for its **✎**, **–** and **×** buttons:
+
+- **✎ Edit** (or **E**) opens the pin in the editor with the whole toolbar: blur, boxes, circles, arrows,
+  text, steps. **Pin** (Ctrl + P) or **Enter** puts the result back in the pin; **Copy** and **Save** do too,
+  and copy or save it; **Esc** leaves the pin as it was.
+- **Crop** (**C**, or right-click) opens it with the selection's edges ready to drag in; **Pin** keeps that part.
+- **–** (or **M**) minimizes it to the taskbar; clicking it there brings it back on top.
+- **Ctrl + wheel** (or right-click, **See-through**) fades it, down to 20%, to lay it over a window and compare.
+
+Pins step aside while you take the next screenshot;
 turn on **Show pins in screenshots** in Settings to keep them in it, for example to capture two pins side by
 side (then a click in the editor picks a pin, like a window).
 
