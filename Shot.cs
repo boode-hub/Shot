@@ -1705,7 +1705,7 @@ namespace Shot
             if (minimized)
             {
                 minimized = false;
-                BeginInvoke((Action)(() => { ShowInTaskbar = false; TopMost = true; Activate(); }));
+                BeginInvoke((Action)(() => { if (IsDisposed) return; ShowInTaskbar = false; TopMost = true; Activate(); }));
             }
             zoom = (float)ClientSize.Width / Img.Width;
             Invalidate();
@@ -1857,6 +1857,10 @@ namespace Shot
         {
             App.Pins.Remove(this);
             Img.Dispose();
+            // A form does not free the menu it was given; once shown, that menu holds a window.
+            var menu = ContextMenuStrip;
+            ContextMenuStrip = null;
+            if (menu != null) menu.Dispose();
             base.OnFormClosed(e);
         }
     }
@@ -2015,7 +2019,7 @@ namespace Shot
             MUTED = Ui.Hex(0x8E8E96), CONTROL = Ui.Hex(0x2C2C30), CONTROL_HOVER = Ui.Hex(0x3A3A40), KNOB_OFF = Ui.Hex(0x3A3A3F),
             ACCENT = Ui.Hex(0xE0182D), GOOD = Ui.Hex(0x34C759);
         const float W = 460, H = 662, Pad = 24, Inner = W - Pad * 2;
-        enum Hit { None = -1, Update, Hotkey, PinsInShots, ChangeFolder, ModeAsk, ModeFolder, CopyOnSave, Autostart, OpenFolder, Quit }
+        internal enum Hit { None = -1, Update, Hotkey, PinsInShots, ChangeFolder, ModeAsk, ModeFolder, CopyOnSave, Autostart, OpenFolder, Quit }
 
         readonly float sc;
         readonly Bitmap logo;
@@ -2043,7 +2047,7 @@ namespace Shot
         Rectangle RightOf(float y, float h, float w, float rh) { return R(Pad + Inner - 16 - w, y + (h - rh) / 2, w, rh); }
 
         const float C1 = 120, C2 = 306, C3 = 506;
-        Rectangle Zone(Hit h)
+        internal Rectangle Zone(Hit h)
         {
             switch (h)
             {
@@ -2061,9 +2065,9 @@ namespace Shot
             return Rectangle.Empty;
         }
 
-        Hit HitAt(Point p)
+        internal Hit HitAt(Point p)
         {
-            for (var h = Hit.Hotkey; h <= Hit.Quit; h++) if (Zone(h).Contains(p)) return h;
+            for (var h = Hit.Update; h <= Hit.Quit; h++) if (Zone(h).Contains(p)) return h;
             return Hit.None;
         }
 
@@ -3016,6 +3020,8 @@ namespace Shot
         readonly Label info;
         readonly CheckBox fixBox;
         readonly Button prev, next, harder, copy;
+        readonly ToolTip tips = new ToolTip();
+        readonly Font mono;
         List<OcrPass> passes = new List<OcrPass>();
         string best = "", bestRaw = "";
         int agree, agreeRaw, shown;
@@ -3046,7 +3052,7 @@ namespace Shot
             box = new TextBox
             {
                 Dock = DockStyle.Fill, Multiline = true, AcceptsReturn = false, WordWrap = false, ScrollBars = ScrollBars.Both,
-                BorderStyle = BorderStyle.None, BackColor = CARD, ForeColor = TEXT, Font = new Font("Consolas", 16 * sc, GraphicsUnit.Pixel), ReadOnly = true
+                BorderStyle = BorderStyle.None, BackColor = CARD, ForeColor = TEXT, Font = mono = new Font("Consolas", 16 * sc, GraphicsUnit.Pixel), ReadOnly = true
             };
             var textArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(S(14), S(10), S(14), S(10)), BackColor = CARD };
             textArea.Controls.Add(box);
@@ -3060,7 +3066,6 @@ namespace Shot
             fixBox = new CheckBox { Text = "Fix IPs, MACs, numbers", Checked = true, AutoSize = true, ForeColor = TEXT, Margin = new Padding(S(4), S(8), S(16), 0) };
             fixBox.CheckedChanged += (s, e) => ShowReading(shown);
             bar.Controls.AddRange(new Control[] { copy, retake, harder, next, prev, fixBox });
-            var tips = new ToolTip();
             tips.SetToolTip(prev, "Previous reading");
             tips.SetToolTip(next, "Next reading: what each way of reading saw");
             tips.SetToolTip(harder, "Read again more ways (slower)");
@@ -3158,7 +3163,15 @@ namespace Shot
         {
             pic.Image = null;
             img.Dispose();
+            tips.Dispose();
             base.OnFormClosed(e);
+        }
+
+        // The text box does not free a font it was given; it goes once the box itself has.
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing) mono.Dispose();
         }
     }
 
@@ -3185,6 +3198,9 @@ namespace Shot
         /// checks that its secret key matches this before it signs.
         internal const string Modulus = "CB030AF21E96D3BF6BFF842B76133CF1CDA8E48CB7C2233F6E169EA5D23256A57235851BFD8B191C0D55B358ADC4DACB8D3D894627A920824C0F3A6A0CE1B89F25AF025714E4D8924F864BAE34C3F44641B2673976C7C35306866FBD090C51DC947A93093D2C6140EF3F500FD1312D49897F871AF3BFC4413A12F145E1661B03C7189AAFBCE9A58720656E6F4AAB226B62D47AEDCB682FD53873889F0C25493638914C077658E0348715550CD33A6988D9B1FE9CED9E742447D41EF554C46EACC3C0302F9895ACF74C25C88339D2E31096CA1D553DC252652223A76D6D3B02DA3A67F7D53C2C7B17A01B3B053D5551A17A9F375255B119EA771C02285533A3006C76E35C36D11AB48C8A0D4FD35E7E4EA98D7D8E921B548C40AC3722420DEF17DF267D1489EED91E6C52A9B9905AEAB61D81C8FCB6B6862EA78D865F689DB28CD63A9D6D621990D937650CCF67FDD4BF7B81106E24E4EFF083889556CF0C2C4C806A96FD40A2BC53A1DE19554183D7DACCF2F03FCA8F11628E433E512CF73E31";
         const int MaxSmall = 1 << 20, MaxZip = 50 << 20;
+        /// Held while files are swapped; Shot quitting takes it too, so it never quits halfway.
+        internal static readonly object Swapping = new object();
+        internal static bool Stopped;
         const long MaxUnpacked = 100L << 20;
 
         internal class Release
@@ -3411,7 +3427,11 @@ namespace Shot
                 step("Checking Shot " + r.Version + "\u2026");
                 SelfTest(fresh, r.Version);
                 step("Installing Shot " + r.Version + "\u2026");
-                Swap(root, fresh, old);
+                lock (Swapping)
+                {
+                    if (Stopped) throw new IOException("Shot was quitting; nothing was changed.");
+                    Swap(root, fresh, old);
+                }
             }
             finally { try { if (Directory.Exists(fresh)) Directory.Delete(fresh, true); } catch { } }
         }
@@ -3434,7 +3454,7 @@ namespace Shot
 
     public static class App
     {
-        public const string Version = "2.8.0";
+        public const string Version = "2.8.1";
         const string Fallback = "Ctrl+PrintScreen";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -3464,7 +3484,8 @@ namespace Shot
             if (Native.SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero) Native.SetProcessDPIAware();
             Application.EnableVisualStyles();
             try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException); } catch { }
-            Application.ThreadException += (s, e) => { Log(e.Exception); ShowToast("Something went wrong: " + e.Exception.Message, 5); };
+            Application.ThreadException += (s, e) => { Log(e.Exception); try { ShowToast("Something went wrong: " + e.Exception.Message, 5); } catch { } };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => Log(e.ExceptionObject as Exception);
 
             root = rootDir;
             cfgPath = Path.Combine(root, "data", "settings.txt");
@@ -3476,12 +3497,12 @@ namespace Shot
 
             // A second launch of Shot asks this one to show Settings.
             var ev = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\Shot.OpenSettings");
-            var listener = new Thread(() => { while (ev.WaitOne()) host.BeginInvoke((Action)OpenSettings); });
+            var listener = new Thread(() => { while (ev.WaitOne()) OnUi(OpenSettings); });
             listener.IsBackground = true;
             listener.Start();
             // Remove Shot.vbs asks it to quit.
             var quit = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\Shot.Quit");
-            var quitter = new Thread(() => { while (quit.WaitOne()) host.BeginInvoke((Action)Quit); });
+            var quitter = new Thread(() => { while (quit.WaitOne()) OnUi(Quit); });
             quitter.IsBackground = true;
             quitter.Start();
 
@@ -3503,23 +3524,36 @@ namespace Shot
             tray.Dispose();
         }
 
+        /// Work from another thread, run on the UI thread; nothing at all if Shot is already gone.
+        static void OnUi(Action a)
+        {
+            var h = host;
+            try { if (h != null && h.IsHandleCreated && !h.IsDisposed) h.BeginInvoke(a); }
+            catch (InvalidOperationException) { }
+        }
+
         // ----- updates (see Updater) -------------------------------------------------------
 
         /// What an update is doing right now, for Settings; null when nothing is.
         internal static string UpdateNote;
+        static bool updating;
 
         static void Note(string s) { UpdateNote = s; if (settings != null) settings.Invalidate(); }
+
+        /// An owner that keeps a dialog in front of everything, pins included (they stay on top).
+        static Form Front() { return new Form { TopMost = true, ShowInTaskbar = false, StartPosition = FormStartPosition.CenterScreen, Size = new Size(1, 1) }; }
 
         /// A message box in front of everything (Shot usually has no window of its own open).
         static DialogResult Ask(string text, MessageBoxButtons buttons, MessageBoxIcon icon)
         {
-            using (var front = new Form { TopMost = true, ShowInTaskbar = false, StartPosition = FormStartPosition.CenterScreen, Size = new Size(1, 1) })
+            using (var front = Front())
                 return MessageBox.Show(settings != null && settings.Visible ? (IWin32Window)settings : front, text, "Shot", buttons, icon);
         }
 
         internal static void CheckForUpdates()
         {
-            if (UpdateNote != null) return;
+            if (updating) return;
+            updating = true;
             Note("Checking for updates\u2026");
             var t = new Thread(() =>
             {
@@ -3527,7 +3561,7 @@ namespace Shot
                 string error = null;
                 try { r = Updater.Latest(); }
                 catch (Exception e) { error = e.Message; }
-                host.BeginInvoke((Action)(() => Offer(r, error)));
+                OnUi(() => Offer(r, error));
             });
             t.IsBackground = true;
             t.Start();
@@ -3536,26 +3570,33 @@ namespace Shot
         static void Offer(Updater.Release r, string error)
         {
             Note(null);
-            if (error != null) { Ask("Shot could not check for updates: " + error, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            if (r.Version.CompareTo(Updater.Current) <= 0) { ShowToast("Shot " + Version + " is up to date.", 3); return; }
-            if (Ask("Shot " + r.Version + " is available (you have " + Version + ").\n\nUpdate now? Shot first checks that the download is signed with its own key "
-                + "and passes its self-check; only then are the files replaced. Your settings stay.\n\nWhat is new: " + r.Page,
-                MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
-            Note("Downloading Shot " + r.Version + "\u2026");
-            var t = new Thread(() =>
+            bool installing = false;
+            try
             {
-                string failed = null;
-                try { Updater.Install(root, r, s => host.BeginInvoke((Action)(() => Note(s)))); }
-                catch (Exception e) { failed = e.Message; Log(e); }
-                host.BeginInvoke((Action)(() => Installed(r, failed)));
-            });
-            t.IsBackground = true;
-            t.Start();
+                if (error != null) { Ask("Shot could not check for updates: " + error, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+                if (r.Version.CompareTo(Updater.Current) <= 0) { ShowToast("Shot " + Version + " is up to date.", 3); return; }
+                if (Ask("Shot " + r.Version + " is available (you have " + Version + ").\n\nUpdate now? Shot first checks that the download is signed with its own key "
+                    + "and passes its self-check; only then are the files replaced. Your settings stay.\n\nWhat is new: " + r.Page,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
+                Note("Downloading Shot " + r.Version + "\u2026");
+                var t = new Thread(() =>
+                {
+                    string failed = null;
+                    try { Updater.Install(root, r, s => OnUi(() => Note(s))); }
+                    catch (Exception e) { failed = e.Message; Log(e); }
+                    OnUi(() => Installed(r, failed));
+                });
+                t.IsBackground = true;
+                t.Start();
+                installing = true;
+            }
+            finally { if (!installing) updating = false; }
         }
 
         static void Installed(Updater.Release r, string failed)
         {
             Note(null);
+            updating = false;
             if (failed != null) { Ask("Shot could not update to " + r.Version + ": " + failed + "\n\nNothing was changed.", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             if (Ask("Shot " + r.Version + " is installed. Restart Shot now?", MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
             {
@@ -3570,6 +3611,8 @@ namespace Shot
 
         internal static void Quit()
         {
+            // An update swapping files finishes first, and none starts after this.
+            lock (Updater.Swapping) Updater.Stopped = true;
             // Every window closes with it, the spotlight and pins included.
             foreach (Form f in new List<Form>(Application.OpenForms.Cast<Form>())) f.Close();
             Application.Exit();
@@ -3577,6 +3620,7 @@ namespace Shot
 
         static void Log(Exception e)
         {
+            if (e == null || root == null) return;
             try
             {
                 string log = Path.Combine(root, "data", "error.log");
@@ -3810,7 +3854,7 @@ namespace Shot
             if (spotlight != null) ToggleSpotlight();
             foreach (var p in Pins) { if (keepPins && p != edit) p.Unhover(); else p.Visible = false; }
             if (hide) Thread.Sleep(80);
-            Bitmap shot;
+            Bitmap shot = null;
             var v = SystemInformation.VirtualScreen;
             try
             {
@@ -3819,6 +3863,7 @@ namespace Shot
             }
             catch (Exception e)
             {
+                if (shot != null) shot.Dispose();
                 foreach (var p in Pins) p.Visible = true;
                 ShowToast("Capture failed: " + e.Message, 4);
                 return;
@@ -3842,7 +3887,15 @@ namespace Shot
                 mons.Add(new Rectangle(b.X - v.X, b.Y - v.Y, b.Width, b.Height));
                 scales.Add(Native.ScaleAt(new Point(b.X + b.Width / 2, b.Y + b.Height / 2)));
             }
-            overlay = new Overlay(shot, v, wins, mons, scales, Cfg, Ocr != null);
+            try { overlay = new Overlay(shot, v, wins, mons, scales, Cfg, Ocr != null); }
+            catch (Exception e)
+            {
+                // Not enough memory for a screen this size, say: the pin comes back, nothing is kept.
+                shot.Dispose();
+                if (edit != null) edit.Visible = true;
+                ShowToast("Capture failed: " + e.Message, 4);
+                return;
+            }
             editing = edit;
             if (edit != null)
             {
@@ -3886,7 +3939,7 @@ namespace Shot
             if (overlay != o) return;
             overlay = null;
             // Closed some other way while a pin was in it: the pin comes back as it was.
-            if (editing != null) { editing.Visible = true; editing = null; }
+            if (editing != null) { if (!editing.IsDisposed) editing.Visible = true; editing = null; }
         }
 
         /// What to do with a finished capture.
@@ -3905,6 +3958,8 @@ namespace Shot
             }
             var edit = editing;
             editing = null;
+            // The pin was closed meanwhile (Close all pins): this is an ordinary capture now.
+            if (edit != null && edit.IsDisposed) edit = null;
             overlay = null;
             o.Close();
             if (edit != null)
@@ -3947,13 +4002,15 @@ namespace Shot
             string name = "Shot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture) + ".png";
             try
             {
-                Directory.CreateDirectory(Cfg.SaveDir);
+                // Asking where, a folder that cannot be made is no reason not to ask.
+                try { Directory.CreateDirectory(Cfg.SaveDir); } catch { if (!ask) throw; }
                 string path;
                 if (ask)
                 {
+                    using (var front = Front())
                     using (var d = new SaveFileDialog { Title = "Save screenshot", InitialDirectory = Cfg.SaveDir, FileName = name, Filter = "PNG image (*.png)|*.png", DefaultExt = "png", AddExtension = true })
                     {
-                        if (d.ShowDialog() != DialogResult.OK) return;
+                        if (d.ShowDialog(front) != DialogResult.OK) return;
                         path = d.FileName;
                     }
                 }
@@ -3973,7 +4030,9 @@ namespace Shot
         internal static void ReadText(Bitmap img)
         {
             if (Ocr == null) { img.Dispose(); ShowToast("Text recognition is not available on this system", 4); return; }
-            var p = new OcrPreview(img);
+            OcrPreview p;
+            try { p = new OcrPreview(img); }
+            catch { img.Dispose(); throw; }
             p.Show();
             p.TopMost = true;
             p.TopMost = false;
@@ -4265,6 +4324,14 @@ namespace Shot
 
             using (var logo = Ui.Logo(64))
                 check(logo.GetPixel(32, 32).ToArgb() == Color.Black.ToArgb() && logo.GetPixel(0, 0).A == 0, "logo draws");
+            // Every part of Settings answers a click in its middle (Check for updates once did not).
+            using (var f = new SettingsForm())
+                foreach (SettingsForm.Hit h in Enum.GetValues(typeof(SettingsForm.Hit)))
+                {
+                    if (h == SettingsForm.Hit.None) continue;
+                    var z = f.Zone(h);
+                    check(f.HitAt(new Point(z.X + z.Width / 2, z.Y + z.Height / 2)) == h, "Settings: " + h + " can be clicked");
+                }
             return fails.Count == 0 ? "ok" : "FAILED: " + string.Join("; ", fails.ToArray());
         }
     }

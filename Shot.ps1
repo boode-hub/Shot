@@ -72,6 +72,7 @@ try {
     function Read-Text([System.Drawing.Bitmap[]]$bmps) {
         $engines = @(foreach ($b in $bmps) { [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() })
         $pictures = New-Object System.Collections.Generic.List[object]
+        $tasks = @()
         try {
             foreach ($bmp in $bmps) {
                 # The pixels as they are: no image file in between.
@@ -86,7 +87,7 @@ try {
                 $bytes = $null
             }
             $reading = $script:asTask.MakeGenericMethod([Windows.Media.Ocr.OcrResult])
-            $tasks = for ($n = 0; $n -lt $pictures.Count; $n++) { $reading.Invoke($null, @($engines[$n].RecognizeAsync($pictures[$n]))) }
+            $tasks = @(for ($n = 0; $n -lt $pictures.Count; $n++) { $reading.Invoke($null, @($engines[$n].RecognizeAsync($pictures[$n]))) })
             foreach ($task in @($tasks)) {
                 $task.Wait()
                 # One word per row: line number, box, text. Shot puts the words together itself.
@@ -101,7 +102,11 @@ try {
                 }
                 $sb.ToString()
             }
-        } finally { foreach ($pic in $pictures) { $pic.Dispose() } }
+        } finally {
+            # Every reading done (even after one failed) before its picture goes.
+            foreach ($task in $tasks) { try { [void]$task.Wait() } catch { } }
+            foreach ($pic in $pictures) { $pic.Dispose() }
+        }
     }
     try {
         Add-Type -AssemblyName System.Runtime.WindowsRuntime
